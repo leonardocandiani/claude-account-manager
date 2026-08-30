@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# Profile manager for multiple Claude Code accounts on macOS (+ optional Orca integration).
+# Secrets live exclusively in the macOS Keychain; this file never contains tokens.
+set -euo pipefail
+
+CONFIG_DIR="${CLAUDE_ACCOUNT_HOME:-$HOME/.config/claude-account}"
+PROFILES_DIR="$CONFIG_DIR/profiles"
+ACTIVE_FILE="$CONFIG_DIR/active"
+WRAPPER_BIN="$HOME/bin/claude"
+NATIVE_SERVICE="Claude Code-credentials"
+
+die() { printf 'claude-account: ERROR: %s\n' "$*" >&2; exit 1; }
+note() { printf 'claude-account: %s\n' "$*"; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+# Locate the real Claude Code binary, never the profile wrapper itself.
+# Override with CLAUDE_NATIVE_BIN when your install lives somewhere else.
+find_native_bin() {
+  if [ -n "${CLAUDE_NATIVE_BIN:-}" ]; then
+    printf '%s\n' "$CLAUDE_NATIVE_BIN"
+    return 0
+  fi
+  set -- \
+    "$HOME/.local/bin/claude" \
+    "$HOME/.claude/local/claude" \
+    /opt/homebrew/bin/claude \
+    /usr/local/bin/claude
+  for cand in "$@"; do
+    if [ -x "$cand" ] && [ "$cand" != "$WRAPPER_BIN" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  while IFS= read -r cand; do
+    if [ -x "$cand" ] && [ "$cand" != "$WRAPPER_BIN" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done < <(command -v -a claude 2>/dev/null || true)
+  return 1
+}
+
+NATIVE_BIN="$(find_native_bin || true)"
+
+ensure_base() {
+  mkdir -p "$PROFILES_DIR"
+  chmod 700 "$CONFIG_DIR" "$PROFILES_DIR" 2>/dev/null || true
+  [ -n "$NATIVE_BIN" ] && [ -x "$NATIVE_BIN" ] || \
+    die "native Claude Code binary not found; set CLAUDE_NATIVE_BIN=/path/to/claude"
+  need jq
+  need security
+}
+
+validate_name() {
+  case "${1:-}" in
+    ''|*[!a-zA-Z0-9._-]*) die "invalid profile name: use letters, digits, dot, _ or -" ;;
+  esac
+}
+
+profile_file() { printf '%s/%s.json' "$PROFILES_DIR" "$1"; }
+
+load_profile() {
+  PROFILE_NAME="$1"
+  validate_name "$PROFILE_NAME"
+  PROFILE_FILE="$(profile_file "$PROFILE_NAME")"
+  [ -f "$PROFILE_FILE" ] || die "profile does not exist: $PROFILE_NAME"
+  PROFILE_TYPE="$(jq -er '.type' "$PROFILE_FILE")"
+  KEYCHAIN_SERVICE="$(jq -er '.keychainService' "$PROFILE_FILE")"
+  PROFILE_LABEL="$(jq -r '.label // .name' "$PROFILE_FILE")"
+  case "$PROFILE_TYPE" in
+    oauth_token|native_archive) ;;
+    *) die "unknown profile type in $PROFILE_FILE: $PROFILE_TYPE" ;;
+  esac
+}
+
+active_name() {
+  [ -f "$ACTIVE_FILE" ] || return 1
+  tr -d '[:space:]' < "$ACTIVE_FILE"
+}
+
+set_active() {
+  tmp="$(mktemp "$CONFIG_DIR/.active.XXXXXX")"
+  printf '%s\n' "$1" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$ACTIVE_FILE"
+}
+
+keychain_get() {
+  security find-generic-password -a "$USER" -s "$1" -w 2>/dev/null
+}
+
+keychain_has() {
+  security find-generic-password -a "$USER" -s "$1" >/dev/null 2>&1
+}
+
+fingerprint() {
+  printf '%s' "$1" | shasum -a 256 | cut -c1-12
+}
+
+write_profile() {
+  name="$1" type="$2" service="$3" label="$4"
+  file="$(profile_file "$name")"
+  tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+  jq -n \
+    --arg name "$name" \
+    --arg type "$type" \
+    --arg service "$service" \
+    --arg label "$label" \
+    '{version:1,name:$name,type:$type,keychainService:$service,label:$label}' > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$file"
+}
+
+archive_native_if_present() {
+  archive_service="$1"
+  if keychain_has "$NATIVE_SERVICE"; then
+    blob="$(keychain_get "$NATIVE_SERVICE")"
+    security add-generic-password -U -a "$USER" -s "$archive_service" -w "$blob" >/dev/null
+    check="$(keychain_get "$archive_service")"
+    [ "$(fingerprint "$blob")" = "$(fingerprint "$check")" ] || die "archived native credential does not match"
+    unset blob check
+  fi
+}
+
+remove_native_active() {
+  if keychain_has "$NATIVE_SERVICE"; then
+    security delete-generic-password -a "$USER" -s "$NATIVE_SERVICE" >/dev/null
+  fi
+}
+
+restore_native_active() {
+  archive_service="$1"
+  blob="$(keychain_get "$archive_service")" || die "native archive missing from Keychain"
+  security add-generic-password -U -a "$USER" -s "$NATIVE_SERVICE" -w "$blob" >/dev/null
+  unset blob
+}
+
+strip_stale_account_metadata() {
+  file="$HOME/.claude.json"
+  [ -f "$file" ] || return 0
+  jq -e 'has("oauthAccount")' "$file" >/dev/null 2>&1 || return 0
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  cp "$file" "$file.bak-claude-account-$stamp"
+  tmp="$(mktemp)"
+  jq 'del(.oauthAccount)' "$file" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$file"
+  note "previous oauthAccount metadata archived at $file.bak-claude-account-$stamp"
+}
+
+stop_claude_daemon() {
+  "$NATIVE_BIN" daemon stop --any >/dev/null 2>&1 || true
+}
+
+schedule_orca_restart() {
+  helper="$HOME/.local/lib/claude-account-manager/restart-orca.sh"
+  if [ ! -x "$helper" ]; then
+    note "restart your terminal sessions (and Orca, if you use it) for the switch to take effect"
+    return 0
+  fi
+  nohup "$helper" >/tmp/claude-account-restart-orca.log 2>&1 </dev/null &
+  note "Orca will restart shortly"
+}
+
+cmd_add_oauth() {
+  name="${1:-}"
+  validate_name "$name"
+  service="Claude Code OAuth Token - $name"
+  printf 'Paste the setup-token for profile %s (hidden input): ' "$name" >&2
+  IFS= read -r -s token
+  printf '\n' >&2
+  case "$token" in
+    sk-ant-oat01-*) ;;
+    *) unset token; die "unexpected setup-token format" ;;
+  esac
+  auth_json="$(CLAUDE_CODE_OAUTH_TOKEN="$token" "$NATIVE_BIN" auth status)"
+  [ "$(printf '%s' "$auth_json" | jq -r '.loggedIn // false')" = true ] || {
+    unset token auth_json
+    die "token rejected by Claude Code"
+  }
+  security add-generic-password -U -a "$USER" -s "$service" -w "$token" >/dev/null
+  write_profile "$name" oauth_token "$service" "$name (OAuth setup-token)"
+  note "OAuth profile '$name' stored in the Keychain"
+  unset token auth_json
+}
+
+cmd_import_native() {
+  name="${1:-primary}"
+  validate_name "$name"
+  keychain_has "$NATIVE_SERVICE" || die "no active native credential to import"
+  service="Claude Code-credentials-$name-archive"
+  archive_native_if_present "$service"
+  write_profile "$name" native_archive "$service" "$name (native login)"
+  note "native credential imported as profile '$name'"
+}
+
+cmd_use() {
+  name="${1:-}"
+  shift || true
+  restart=true
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --restart-orca) restart=true ;;
+      --no-restart) restart=false ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  load_profile "$name"
+
+  case "$PROFILE_TYPE" in
+    oauth_token)
+      token="$(keychain_get "$KEYCHAIN_SERVICE")" || die "token missing from Keychain: $KEYCHAIN_SERVICE"
+      auth_json="$(CLAUDE_CODE_OAUTH_TOKEN="$token" "$NATIVE_BIN" auth status)"
+      [ "$(printf '%s' "$auth_json" | jq -r '.loggedIn // false')" = true ] || die "OAuth for profile '$name' was rejected"
+
+      # If a native login is active, preserve it before removing the fallback.
+      if keychain_has "$NATIVE_SERVICE"; then
+        primary_archive="Claude Code-credentials-primary-archive"
+        archive_native_if_present "$primary_archive"
+        if [ ! -f "$(profile_file primary)" ]; then
+          write_profile primary native_archive "$primary_archive" "primary (native login)"
+        fi
+      fi
+      remove_native_active
+      launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$token"
+      strip_stale_account_metadata
+      unset token auth_json
+      ;;
+    native_archive)
+      launchctl unsetenv CLAUDE_CODE_OAUTH_TOKEN >/dev/null 2>&1 || true
+      restore_native_active "$KEYCHAIN_SERVICE"
+      ;;
+  esac
+
+  set_active "$name"
+  stop_claude_daemon
+  note "active profile: $name ($PROFILE_TYPE)"
+  [ "$restart" = true ] && schedule_orca_restart
+}
+
+cmd_list() {
+  active="$(active_name 2>/dev/null || true)"
+  found=false
+  for file in "$PROFILES_DIR"/*.json; do
+    [ -f "$file" ] || continue
+    found=true
+    name="$(jq -r '.name' "$file")"
+    type="$(jq -r '.type' "$file")"
+    label="$(jq -r '.label // .name' "$file")"
+    mark=' '
+    [ "$name" = "$active" ] && mark='*'
+    printf '%s %-16s %-15s %s\n' "$mark" "$name" "$type" "$label"
+  done
+  [ "$found" = true ] || note "no profiles registered"
+}
+
+cmd_status() {
+  active="$(active_name 2>/dev/null || true)"
+  [ -n "$active" ] || die "no active profile"
+  load_profile "$active"
+  printf 'profile=%s\ntype=%s\nlabel=%s\n' "$PROFILE_NAME" "$PROFILE_TYPE" "$PROFILE_LABEL"
+  if secret="$(keychain_get "$KEYCHAIN_SERVICE" 2>/dev/null)"; then
+    printf 'keychain=present\nfingerprint=%s\n' "$(fingerprint "$secret")"
+  else
+    printf 'keychain=absent\n'
+  fi
+  launch_value="$(launchctl getenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
+  if [ -n "$launch_value" ]; then
+    printf 'launchctl_oauth=present\nlaunchctl_fingerprint=%s\n' "$(fingerprint "$launch_value")"
+  else
+    printf 'launchctl_oauth=absent\n'
+  fi
+  keychain_has "$NATIVE_SERVICE" && echo 'native_fallback=present' || echo 'native_fallback=absent'
+  unset secret launch_value
+}
+
+cmd_doctor() {
+  failures=0
+  active="$(active_name 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    echo '[FAIL] no active profile'
+    return 1
+  fi
+  load_profile "$active"
+  if secret="$(keychain_get "$KEYCHAIN_SERVICE" 2>/dev/null)"; then
+    echo '[ok] active profile has a credential in the Keychain'
+  else
+    echo '[FAIL] profile credential missing from the Keychain'; failures=$((failures + 1))
+  fi
+  if [ "$PROFILE_TYPE" = oauth_token ]; then
+    launch_value="$(launchctl getenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
+    if [ -n "${secret:-}" ] && [ "$(fingerprint "$secret")" = "$(fingerprint "$launch_value")" ]; then
+      echo '[ok] launchctl points to the active OAuth profile'
+    else
+      echo '[FAIL] launchctl diverges from the active profile'; failures=$((failures + 1))
+    fi
+    if keychain_has "$NATIVE_SERVICE"; then
+      echo '[FAIL] a stale native login is still active (it shadows the setup-token)'; failures=$((failures + 1))
+    else
+      echo '[ok] native fallback is blocked'
+    fi
+  else
+    if keychain_has "$NATIVE_SERVICE"; then
+      echo '[ok] native credential restored to the active slot'
+    else
+      echo '[FAIL] active native credential missing'; failures=$((failures + 1))
+    fi
+  fi
+  if [ -x "$WRAPPER_BIN" ]; then
+    echo '[ok] claude wrapper installed'
+  else
+    echo '[FAIL] wrapper missing'; failures=$((failures + 1))
+  fi
+  if grep -q 'claude-account-manager/shell-init.zsh' "$HOME/.zprofile" 2>/dev/null; then
+    echo '[ok] bootstrap present in .zprofile'
+  else
+    echo '[FAIL] bootstrap missing from .zprofile'; failures=$((failures + 1))
+  fi
+  unset secret launch_value
+  [ "$failures" -eq 0 ] || return 1
+}
+
+apply_profile_env() {
+  active="$(active_name 2>/dev/null || true)"
+  [ -n "$active" ] || die "no active profile"
+  load_profile "$active"
+  case "$PROFILE_TYPE" in
+    oauth_token)
+      token="$(keychain_get "$KEYCHAIN_SERVICE")" || die "OAuth token missing from Keychain"
+      export CLAUDE_CODE_OAUTH_TOKEN="$token"
+      unset token
+      ;;
+    native_archive)
+      unset CLAUDE_CODE_OAUTH_TOKEN
+      ;;
+  esac
+}
+
+cmd_exec() {
+  apply_profile_env
+  exec "$NATIVE_BIN" "$@"
+}
+
+cmd_probe() {
+  apply_profile_env
+  "$NATIVE_BIN" auth status
+  "$NATIVE_BIN" -p 'Reply with exactly: CLAUDE-ACCOUNT-OK'
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  claude-account add-oauth <name>       register a profile from a setup-token
+  claude-account import-native [name]   import the current native login as a profile
+  claude-account use <name> [--restart-orca|--no-restart]
+  claude-account list
+  claude-account status
+  claude-account doctor
+  claude-account probe
+
+`claude` always runs the profile marked as active.
+Override the native binary path with CLAUDE_NATIVE_BIN=/path/to/claude.
+EOF
+}
+
+ensure_base
+command_name="${1:-help}"
+shift || true
+case "$command_name" in
+  add-oauth) cmd_add_oauth "$@" ;;
+  import-native) cmd_import_native "$@" ;;
+  use) cmd_use "$@" ;;
+  list) cmd_list "$@" ;;
+  status) cmd_status "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  probe) cmd_probe "$@" ;;
+  exec) cmd_exec "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; die "unknown command: $command_name" ;;
+esac
