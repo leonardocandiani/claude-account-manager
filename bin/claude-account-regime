@@ -17,8 +17,8 @@
 #             resets; heavy things get downgraded until the reset
 #   pouso     would be economia, but the 5h reset is close (<= pouso_min) and
 #             usage + recent pace fits under 100 until then: no brake
-#   trava     both accounts are out (the active one rejected or paying
-#             overage, the other one not allowed): only the main session goes
+#   trava     both accounts are out (rejected, or paying overage), measured as
+#             such; an unknown probe never locks anything
 #
 # Hysteresis lives in regime.state.json: a change needs `hyst` consecutive
 # measurements (the autoswitch measures every 5 min) and economia holds at
@@ -130,8 +130,9 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
   (($m.history[$acct] // []) | map(select(.[0] > ($now - 1800) and .[1] != null))) as $h |
   (if ($h | length) >= 2 and ($h[-1][0] - $h[0][0]) > 0 then (($h[-1][1] - $h[0][1]) | if . < 0 then 0 else . end) / ($h[-1][0] - $h[0][0]) else 0 end) as $rate |
   (($p.util_5h // 0) + $rate * $left5 < 100) as $cabe |
-  (($p.status // "unknown") != "allowed" or ($p.overage_in_use // false)) as $acct_out |
-  (($q.status // "unknown") != "allowed" or ($q.overage_in_use // false)) as $other_out |
+  # "out" is a measured fact (rejected, or paying overage); unknown is a dead probe, never a lock
+  ((($p.status // "") == "rejected") or ($p.overage_in_use // false)) as $acct_out |
+  ((($q.status // "") == "rejected") or ($q.overage_in_use // false)) as $other_out |
   ((($q.status // "") == "allowed") and ([$o5, $o7] | map(select(. != null)) | (length == 0 or min >= $th_att))) as $pool_room |
   (if $acct_out and $other_out then "trava"
    elif $res == null then "livre"

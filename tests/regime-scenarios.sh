@@ -53,6 +53,8 @@ setup; measure 91 2100 40 200000 allowed false 96 9 rejected "71 75 79 83 87 91"
 setup; measure 88 600 40 200000 allowed false 96 9 rejected "80 82 84 86 88 88"; tick; measure 90 300 40 200000 allowed false 96 9 rejected "82 84 86 88 90 90" 30; expect "90% faltando 5 min: atencao, sem freio" atencao
 # 7. trava: active paying overage, other rejected (immediate, no hysteresis)
 setup; measure 100 3000 50 200000 allowed true 98 30 rejected; expect "trava: overage na ativa e reserva esgotada" trava
+# 7b. dead probe on both (unknown, null usage) is never trava
+setup; jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{measured_at:$at, profiles:{proteauto:{status:"unknown"}, "leo-iacall":{status:"unknown"}}, history:{}}' > "$H/measure.json"; expect "sonda morta nas duas: livre, nunca trava" livre
 # 8. weekly rules: 5h calm, 7d 88% with 2d21h left
 setup; measure 12 12000 88 250000 allowed false 96 9 rejected; tick; measure 12 11900 88 249900 allowed false 96 9 rejected "" 30; expect "economia pela semanal" economia
 [ "$("$REGIME" --json | jq -r .causa)" = 7d ] && printf 'ok   %-58s 7d\n' "causa da semanal" || { printf 'FAIL causa esperada 7d\n'; fails=$((fails+1)); }
