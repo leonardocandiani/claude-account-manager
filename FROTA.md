@@ -165,3 +165,20 @@ mesmo token de antes (sem regressão). Política lá:
 cor contra o npm e link pra release): Studio, Mini (cópia inteira, base
 idêntica) e MacBook (patch por âncora, `patch-statusline.py`, porque a
 statusline de lá diverge em 70 linhas).
+
+## Jarvis: fechamento em 08/09/2026 (tarde)
+
+- **Primária do Jarvis é `proteauto` nas duas pontas** (decisão do Leo). No
+  Mini os rótulos de `~/.segsclaw/claude-accounts.config.json` estavam
+  invertidos em relação ao plist (índice 0 = proteauto) e "preferred:
+  proteauto" resolvia pra leo-iacall; corrigido (backup `.bak-20260908`), probe
+  re-rodado: `index=0 primary_allowed`, rótulos certos no state.
+- **node02 reiniciado na janela ociosa** por `segsclaw-reinicio-unico.timer`
+  (bun, mesmo critério `ocupacoes()` do sincronizar-deploy, desliga a si mesmo
+  ao conseguir). Serviço no ar às 13:25 UTC com `CLAUDE_CODE_OAUTH_TOKEN` =
+  leo-iacall e `_FALLBACK` = proteauto; state do probe aponta índice 1
+  (proteauto). Gotcha: `bun run --dry-run` NÃO é dry-run, executou o script; o
+  serviço reiniciou duas vezes em 40 s e mandou duas saudações no WhatsApp.
+- **Esgotamento das duas contas:** `decidirIndice` fica na preferida
+  (proteauto, overage habilitado, responde cobrando extra). Alinhamento com a
+  sessão FIXES-MININO em andamento sobre a "lógica padrão do Jarvis" pra limite.
