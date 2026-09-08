@@ -49,6 +49,8 @@ setup; measure 60 12600 40 200000 allowed false 0 9 allowed; tick; measure 61 12
 setup; measure 95 1800 40 200000 allowed false 96 9 rejected "95 95 95 95 95 95"; tick; measure 95 1500 40 200000 allowed false 96 9 rejected "95 95 95 95 95 95" 30; expect "pouso: 95% faltando 25 min, ritmo recente parado" pouso
 # 6. no pouso when it does not fit: 95% with 25 min left and +4 pts per 5 min
 setup; measure 91 2100 40 200000 allowed false 96 9 rejected "71 75 79 83 87 91"; tick; measure 95 1500 40 200000 allowed false 96 9 rejected "75 79 83 87 91 95" 30; expect "sem pouso: 95% faltando 25 min e subindo 4 por 5 min" economia
+# 5b. no pouso when the weekly window also projects exhaustion
+setup; measure 95 1800 92 200000 allowed false 96 9 rejected "95 95 95 95 95 95"; tick; measure 95 1500 92 199700 allowed false 96 9 rejected "95 95 95 95 95 95" 30; expect "sem pouso: a semanal também estoura" economia
 # 6b. 90% with 5 min left and heavy use: projection lands at 90, no brake at all
 setup; measure 88 600 40 200000 allowed false 96 9 rejected "80 82 84 86 88 88"; tick; measure 90 300 40 200000 allowed false 96 9 rejected "82 84 86 88 90 90" 30; expect "90% faltando 5 min: atencao, sem freio" atencao
 # 7. trava: active paying overage, other rejected (immediate, no hysteresis)
@@ -71,6 +73,13 @@ setup; measure 60 12600 40 200000 allowed false 96 9 rejected; tick; measure 61 
 measure 5 12400 10 200000 allowed false 96 9 rejected "" 20; tick; measure 5 12300 10 200000 allowed false 96 9 rejected "" 10; expect "economia segura 15 min" economia
 # 11b. junk state file never breaks a read
 setup; measure 20 7200 12 400000 allowed false 0 9 allowed; : > "$H/regime.state.json"; expect "estado vazio no disco: responde mesmo assim" livre
+# 11c. an extra economia measurement keeps the original hold deadline
+setup; measure 60 12600 40 200000 allowed false 96 9 rejected; tick; measure 61 12500 40 200000 allowed false 96 9 rejected "" 30; tick
+h1=$(jq -r .hold_until "$H/regime.state.json"); measure 62 12400 40 200000 allowed false 96 9 rejected "" 20; tick; h2=$(jq -r .hold_until "$H/regime.state.json")
+runs=$((runs+1)); if [ "$h1" = "$h2" ] && [ "$h1" != 0 ] && [ "$h1" != null ]; then printf 'ok   %-58s\n' "hold_until preservado em medição repetida de economia"; else printf 'FAIL hold_until mudou: %s -> %s\n' "$h1" "$h2"; fails=$((fails+1)); fi
+# 11d. a plain read never rewrites the state file
+setup; measure 20 7200 12 400000 allowed false 0 9 allowed; tick; m1=$(stat -f %m "$H/regime.state.json"); sleep 1.1; tick; m2=$(stat -f %m "$H/regime.state.json")
+runs=$((runs+1)); if [ "$m1" = "$m2" ]; then printf 'ok   %-58s\n' "leitura sem medição nova não regrava o estado"; else printf 'FAIL estado regravado sem mudanca\n'; fails=$((fails+1)); fi
 # 12. young window (10 min elapsed) and calm week: livre
 setup; measure 3 17400 12 400000 allowed false 0 9 allowed; expect "janela nova sem ritmo" livre
 

@@ -145,14 +145,15 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    elif $res == null then "livre"
    elif $res >= $th_att then "livre"
    elif $res >= $th_eco then "atencao"
-   elif $causa == "5h" and $left5 <= $pouso_min * 60 and $cabe then "pouso"
+   elif $causa == "5h" and $left5 <= $pouso_min * 60 and $cabe and ($r7 == null or $r7 >= $th_eco) then "pouso"
    elif $pool_softens and $pool_room then "atencao"
    else "economia" end) as $raw |
   (if $causa == "5h" then $p.reset_5h elif $causa == "7d" then $p.reset_7d else null end) as $reset |
   # --- hysteresis: advance only on a measurement not seen before; trava is immediate both ways (measured fact) ---
   ($state.regime // "livre") as $cur |
   (if ($state.last_measured_at // "") == $mat and $cur != "trava" and $raw != "trava" then $state
-   elif $raw == "trava" or $cur == "trava" or $raw == $cur then $state + {regime: $raw, pending: null, pending_n: 0, since: (if $raw == $cur then ($state.since // $now) else $now end), last_measured_at: $mat, hold_until: 0}
+   elif $raw == $cur then $state + {regime: $raw, pending: null, pending_n: 0, since: ($state.since // $now), last_measured_at: $mat}
+   elif $raw == "trava" or $cur == "trava" then $state + {regime: $raw, pending: null, pending_n: 0, since: $now, last_measured_at: $mat, hold_until: 0}
    else
      (if $state.pending == $raw then ($state.pending_n // 0) + 1 else 1 end) as $n |
      (($cur == "economia") and (($state.hold_until // 0) > $now)) as $held |
@@ -175,9 +176,25 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    medido_ha_min: $age_min, medida_velha: $stale, pendente: ($ns.pending // null), pendente_n: ($ns.pending_n // 0),
    state: $ns}')
 
-# Unique temp per process: two readers (launchd and a shell) may run at once.
-tmp="$STATE.$$.tmp"
-if printf '%s' "$result" | jq -c '.state' > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then mv "$tmp" "$STATE"; else rm -f "$tmp"; fi
+# Only a call that changed the state writes it (a plain read never touches the
+# file), and the write happens under a mkdir lock so two writers cannot rename
+# a stale result over a newer one. A lock older than 10 s is a dead process.
+newstate=$(printf '%s' "$result" | jq -c '.state' 2>/dev/null || echo '')
+if [ -n "$newstate" ] && [ "$newstate" != "$(printf '%s' "$state" | jq -c . 2>/dev/null)" ]; then
+  lock="$STATE.lock"; i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    i=$((i + 1))
+    if [ $i -gt 20 ]; then
+      if [ -n "$(find "$lock" -maxdepth 0 -mmin +0.17 2>/dev/null)" ]; then rm -rf "$lock"; else break; fi
+    fi
+    sleep 0.1
+  done
+  if [ -d "$lock" ]; then
+    tmp="$STATE.$$.tmp"
+    if printf '%s\n' "$newstate" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then mv "$tmp" "$STATE"; else rm -f "$tmp"; fi
+    rmdir "$lock" 2>/dev/null || true
+  fi
+fi
 
 if [ $json -eq 1 ]; then
   printf '%s\n' "$result" | jq 'del(.state)'

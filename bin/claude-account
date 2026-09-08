@@ -390,7 +390,10 @@ apply_profile_env() {
 # cannot be changed from outside; the hooks handle subagents and workflows).
 # An explicit --effort on the command line always wins.
 regime_effort_args() {
-  case " $* " in *" --effort "*|*" --effort="*) return ;; esac
+  local a
+  for a in "$@"; do
+    case "$a" in --) break ;; --effort|--effort=*) return ;; esac
+  done
   local bin="$(dirname "$0")/claude-account-regime" r
   [ -x "$bin" ] || return
   r="$("$bin" --json 2>/dev/null | jq -r '.regime // ""' 2>/dev/null)" || return
