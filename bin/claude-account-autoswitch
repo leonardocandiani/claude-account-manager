@@ -58,6 +58,17 @@ line_fall="$(printf '%s\n' "$measured" | grep "^$fall," || true)"
 
 field() { printf '%s' "$1" | cut -d, -f"$2"; }
 
+# Cache legivel da medicao (a statusline le daqui: o payload do Claude Code so
+# atualiza quando a propria sessao recebe resposta, entao fica velho em sessao
+# parada). Fracoes 0-1 dos headers viram 0-100 aqui.
+MEASURE_CACHE="$CONFIG_DIR/measure.json"
+printf '%s\n' "$measured" | jq -R -s --arg at "$(now_iso)" '
+  split("\n") | map(select(length > 0) | split(",")) |
+  map({key: .[0], value: {status: .[1], util_5h: ((.[3] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
+       reset_5h: (.[4] | tonumber? // null), util_7d: ((.[5] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
+       reset_7d: (.[6] | tonumber? // null)}}) | {measured_at: $at, profiles: from_entries}' > "$MEASURE_CACHE.tmp" 2>/dev/null \
+  && mv "$MEASURE_CACHE.tmp" "$MEASURE_CACHE"
+
 # room <line> <t5> <t7>: 0 when the account can take traffic under the thresholds.
 room() {
   st="$(field "$1" 2)"; u5="$(field "$1" 4)"; u7="$(field "$1" 6)"
