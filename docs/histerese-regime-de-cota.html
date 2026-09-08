@@ -1,0 +1,153 @@
+<!--doc
+{
+  "titulo": "Histerese no regime de cota do Claude",
+  "destaque": "Histerese",
+  "subtitulo": "Por que o freio da cota não pode piscar, e como duas regras simples resolvem isso",
+  "tipo": "Guia",
+  "para": "Leonardo Candiani",
+  "data": "08/09/2026",
+  "modo": "deck",
+  "capa": true,
+  "contexto": "Regime de cota"
+}
+-->
+
+<section data-eyebrow="// o que é" data-titulo="Um termostato para a cota" data-ctx="Regime de cota">
+  <p class="lead">Histerese é a folga entre o ponto em que um sistema liga e o ponto em que ele desliga. O termostato de casa liga o aquecedor a 19 graus e desliga a 21, em vez de ligar e desligar em cima de 20. No regime de cota do Claude, ela impede que o freio entre e saia várias vezes na mesma hora.</p>
+
+  <p>O regime é a palavra que diz o que a cota permite agora: <code>livre</code>, <code>atencao</code>, <code>economia</code>, <code>pouso</code> ou <code>trava</code>. Ela nasce de uma projeção: pela média da janela até aqui, onde o uso chega no reset? Se passa de 100, a reserva fica negativa e o regime pede economia. O problema é que essa projeção balança. Uma rajada de cinco minutos joga a reserva lá embaixo, e a medição seguinte, com você parado, traz de volta.</p>
+
+  <div class="figure" data-flow='{"type":"states","dsl":"Medição a cada 5 min -> Projeção por janela -> Reserva em pontos -> Regime cru -> Histerese -> Regime que vale","nodes":[{"id":"Histerese","kind":"highlight"},{"id":"Regime que vale","kind":"end"}]}'>
+    <figcaption>Onde a histerese entra: entre o número cru de cada medição e a palavra que os hooks obedecem.</figcaption>
+  </div>
+
+  <p>Sem a folga, cada troca de regime muda coisa concreta no meio do trabalho: o modelo dos subagentes cai para Sonnet e volta para Fable, um workflow é negado e liberado, o effort da próxima sessão muda. Você sentiria a sessão engasgar sem saber por quê.</p>
+
+  <table class="papeis">
+    <thead><tr><th>Quem</th><th>Faz</th><th>Onde</th></tr></thead>
+    <tbody>
+      <tr><td>Autoswitch (launchd)</td><td>Mede as duas contas a cada 5 min e grava a medição</td><td><code>~/.config/claude-account/measure.json</code></td></tr>
+      <tr><td>Comando <code>regime</code></td><td>Projeta, aplica a histerese e responde a palavra</td><td><code>claude-account regime</code>, estado em <code>regime.state.json</code></td></tr>
+      <tr><td>Hooks e statusline</td><td>Perguntam a palavra e agem: rebaixam modelo, negam fan-out, mostram o cadeado</td><td><code>~/.claude/hooks/guard-quota-regime.js</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-eyebrow="// como funciona" data-titulo="Duas regras e uma exceção" data-ctx="Regime de cota">
+  <p class="lead">A histerese do regime tem duas peças. Mudar exige duas medições seguidas apontando o mesmo regime novo. E economia, uma vez dentro, segura no mínimo 15 minutos, mesmo que as medições seguintes digam livre.</p>
+
+  <ol class="steps">
+    <li class="step"><strong>Duas medições seguidas para mudar</strong><span>O autoswitch mede a cada 5 min. Uma medição dizendo economia e a próxima dizendo livre é uma rajada: nada muda. Duas seguidas dizendo economia, aí o regime entra. O estado guarda o candidato pendente e quantas vezes ele se repetiu.</span></li>
+    <li class="step"><strong>Economia segura 15 minutos</strong><span>Você entrou em economia, os subagentes caíram para Sonnet, e três minutos depois o número melhorou justamente porque ninguém está gastando. Sem o mínimo, o regime voltaria para livre, o gasto subiria e o ciclo recomeçaria. O prazo fica gravado em <code>hold_until</code> e não é renovado por medições repetidas de economia.</span></li>
+    <li class="step"><strong>Trava não tem histerese</strong><span>Trava é fato medido: conta <code>rejected</code> ou pagando overage. Entra na hora e sai na hora em que a medição deixa de sustentar. Fato não precisa de confirmação, estimativa de ritmo precisa.</span></li>
+  </ol>
+
+  <div class="figure" data-flow='{"type":"states","dsl":"Livre -> Pendente -> Economia -> Livre","nodes":[{"id":"Economia","kind":"highlight"}]}'>
+    <figcaption>A máquina de estados da histerese: uma medição leva a pendente, a segunda confirma, e o retorno só depois do prazo. Trava fica fora dela: entra e sai direto.</figcaption>
+  </div>
+
+  <div class="callout key">
+    <strong>O detalhe que importa para quem lê o código:</strong> a histerese conta medições, não leituras. O hook pode perguntar o regime dez vezes num minuto que o estado não anda. Ele só anda quando o <code>measure.json</code> traz um <code>measured_at</code> que ainda não foi consumido. Leitura repetida nem grava o arquivo de estado.
+  </div>
+
+  <div class="callout">
+    A outra decisão da mesma simulação: a projeção usa só a média da janela. Misturar os últimos 15 minutos extrapolava um pico curto para as quatro horas restantes e produzia o serrote do gráfico da próxima folha. O ritmo recente ficou só para o pouso, a checagem de "cabe até o reset" nos últimos 30 minutos.
+  </div>
+</section>
+
+<section data-eyebrow="// na prática" data-titulo="A manhã de 2 de setembro, com e sem a folga" data-ctx="Regime de cota">
+  <p class="lead">Simulação com os transcripts reais do Studio, calibrada contra 43 medições de 8 de setembro. Na manhã de 2 de setembro a janela de 5h abriu às 07:35 e fechou em 111% de uso. A reserva projetada, a cada meia hora:</p>
+
+  <div class="figure" data-chart='{"type":"line","labels":["08:05","08:35","09:05","09:35","10:05","10:35","11:05","11:35","12:05"],"values":[96,68,44,22,-50,5,-47,-11,-2],"accent":"#708ca1","title":"Reserva projetada da janela de 5h (pontos percentuais)"}'>
+    <figcaption>A projeção com mistura dos últimos 15 minutos: de −50 a +5 e de volta a −47 em uma hora. Foi essa versão que a simulação reprovou.</figcaption>
+  </div>
+
+  <p>Sem histerese, o regime teria entrado em economia às 10:05, saído às 10:35, entrado de novo às 11:05. Cada volta desfaz o rebaixamento dos subagentes e libera workflow, e a rajada seguinte pega tudo em Fable outra vez. Com as duas regras, o regime entra às 10:15 (segunda medição confirmando) e fica, porque o mínimo de 15 minutos cobre a medição enganosa das 10:35 e a seguinte já confirma economia de novo.</p>
+
+  <div class="grid">
+    <div class="cell"><div class="k">Trocas de regime na semana</div><div class="n">28</div><div class="sub">sem histerese</div></div>
+    <div class="cell"><div class="k">Trocas com as duas regras</div><div class="n">18</div><div class="sub">mesma semana simulada</div></div>
+    <div class="cell"><div class="k">Antecedência do aviso</div><div class="n">3 h</div><div class="sub">igual nas duas versões</div></div>
+  </div>
+
+
+</section>
+
+<section data-eyebrow="// onde quebra" data-titulo="Quatro defeitos que a histerese já teve" data-ctx="Regime de cota">
+  <p class="lead">Todos apareceram no mesmo dia, entre a primeira instalação e o review. Cada um tem um sintoma que você consegue ver na saída do comando.</p>
+
+  <table class="tbl">
+    <thead><tr><th>Sintoma</th><th>Causa</th><th>Como conferir</th></tr></thead>
+    <tbody>
+      <tr><td>Mini e MacBook em <code>trava</code> com reserva 40 e contas <code>allowed</code></td><td>Sair de trava dependia de medição nova, e a última já tinha sido consumida</td><td><code>--json</code> com <code>raw: livre</code> e <code>regime: trava</code></td></tr>
+      <tr><td>Economia soltando antes dos 15 minutos</td><td>Cada medição repetida de economia zerava o <code>hold_until</code></td><td><code>hold_until</code> mudando entre duas medições de economia</td></tr>
+      <tr><td>Estado voltando para trás sozinho</td><td>Statusline lia o estado velho e regravava por cima do novo do launchd</td><td>Hoje só quem mudou algo grava, sob lock</td></tr>
+      <tr><td><code>invalid JSON text</code> na leitura</td><td>Arquivo de estado vazio: <code>jq</code> devolve nada e sai 0</td><td>Esvaziar o arquivo e rodar: responde <code>livre</code></td></tr>
+    </tbody>
+  </table>
+
+
+
+  <p>Estado preso por qualquer outro motivo se resolve apagando <code>~/.config/claude-account/regime.state.json</code>: o próximo ciclo do autoswitch recria o arquivo em livre, sem pendente e sem hold. Nada além do estado da histerese mora ali, então apagar não perde medição nem override.</p>
+
+  <div class="callout risk">
+    <strong>Regra que ficou:</strong> nunca rode o autoswitch por SSH no Mini ou no MacBook. Sem o Keychain da sessão gráfica a medição sai <code>unmeasurable</code> e sobrescreve a boa até o próximo ciclo do launchd. Medição desconhecida nunca trava, mas polui o histórico por cinco minutos.
+  </div>
+
+  <p class="rot">conferir num diretório de teste, sem rede</p>
+  <pre>bash ~/tools/claude-account-manager/tests/regime-scenarios.sh
+# 21 casos, 0 falhas</pre>
+</section>
+
+<section data-eyebrow="// referência" data-titulo="Parâmetros, arquivos e saída" data-ctx="Regime de cota">
+  <p class="lead">Tudo ajustável fica em <code>policy.json</code>, na chave <code>regime</code>. O que não está lá usa o default abaixo.</p>
+
+  <table class="tbl">
+    <thead><tr><th>Parâmetro</th><th>Default</th><th>O que faz</th></tr></thead>
+    <tbody>
+      <tr><td><code>hyst</code></td><td>2</td><td>Medições seguidas iguais para o regime mudar</td></tr>
+      <tr><td><code>hold_min</code></td><td>15</td><td>Minutos que economia segura depois de entrar</td></tr>
+      <tr><td><code>atencao</code></td><td>25</td><td>Reserva (em pontos) abaixo da qual sai de livre</td></tr>
+      <tr><td><code>economia</code></td><td>0</td><td>Reserva abaixo da qual entra em economia</td></tr>
+      <tr><td><code>pouso_min</code></td><td>30</td><td>Minutos antes do reset em que o pouso pode valer</td></tr>
+      <tr><td><code>stale_min</code></td><td>15</td><td>Idade da medição a partir da qual o regime vira livre com aviso</td></tr>
+      <tr><td><code>floor7_h</code></td><td>24</td><td>Piso, em horas, da projeção semanal</td></tr>
+      <tr><td><code>pool_softens</code></td><td>true</td><td>Reserva com folga na outra conta amolece economia para atenção</td></tr>
+    </tbody>
+  </table>
+
+  <p class="rot">saída típica</p>
+  <pre>regime: economia
+causa: 5h
+reserva: -18
+reserva_5h: -18
+reserva_7d: 40
+reset: 12:30 (em 1h05)
+conta: proteauto (1º)
+pool: sem reserva
+medido_ha: 2m
+pendente: livre (1 de 2 medicoes)
+help: claude-account regime livre --por 30m | economia --por 1h | auto</pre>
+
+  <p>A linha <code>pendente</code> é a histerese à vista: o candidato que ainda não confirmou e quantas medições ele tem. Override com validade passa por cima de tudo: <code>regime livre --por 30m</code> quando você quer gastar sabendo, <code>regime auto</code> para voltar ao cálculo.</p>
+
+</section>
+
+<section data-eyebrow="// glossário" data-titulo="Termos e o que você precisa saber operar" data-ctx="Regime de cota">
+  <dl class="glossario">
+    <dt>Reserva</dt><dd>Quantos pontos percentuais ainda dá para gastar além do ritmo atual sem estourar antes do reset. Negativa significa que, nesse ritmo, a janela acaba antes de voltar.</dd>
+    <dt>Regime cru</dt><dd>A palavra que sai de uma medição sozinha, antes da histerese. O campo <code>raw</code> do <code>--json</code>.</dd>
+    <dt>Pendente</dt><dd>Regime candidato que apareceu em uma medição e espera a segunda para valer.</dd>
+    <dt>Hold</dt><dd>O mínimo de 15 minutos que economia segura depois de entrar, gravado em <code>hold_until</code>.</dd>
+    <dt>Trava</dt><dd>As duas contas esgotadas de fato (<code>rejected</code> ou overage em uso). Único regime sem histerese, nas duas direções.</dd>
+    <dt>Medição consumida</dt><dd>Um <code>measured_at</code> que o estado já processou. Leitura repetida da mesma medição não anda o estado nem grava o arquivo.</dd>
+  </dl>
+
+  <ul class="check">
+    <li>Você explica por que uma medição isolada de economia não muda o regime.</li>
+    <li>Você sabe ler a linha <code>pendente</code> e dizer o que vai acontecer na próxima medição.</li>
+    <li>Você sabe por que trava entra e sai sem confirmação e economia não.</li>
+    <li>Você sabe qual arquivo apagar, e o que acontece, se o estado ficar preso.</li>
+    <li class="pending">Você já viu o cadeado da statusline acender numa sessão real e conferiu o regime na hora.</li>
+  </ul>
+</section>
