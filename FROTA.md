@@ -182,3 +182,44 @@ statusline de lá diverge em 70 linhas).
 - **Esgotamento das duas contas:** `decidirIndice` fica na preferida
   (proteauto, overage habilitado, responde cobrando extra). Alinhamento com a
   sessão FIXES-MININO em andamento sobre a "lógica padrão do Jarvis" pra limite.
+
+## Regime de cota: "posso seguir?" (08/09/2026, noite)
+
+A mesma projeção que pinta o velocímetro da statusline virou uma regra de
+permissão. `claude-account regime` lê a medição que o autoswitch grava a cada
+5 min, projeta onde cada janela (5h e 7d) da conta ativa chega no reset pela
+média decorrida (piso de 15 min na 5h e de 24 h na 7d) e responde com uma
+palavra: `livre` (reserva de 25 pontos ou mais), `atencao` (entre 0 e 25),
+`economia` (a janela mais apertada estoura antes de resetar), `pouso` (seria
+economia, mas o reset da 5h está a menos de 30 min e uso mais ritmo recente
+cabem até lá) ou `trava` (as duas contas esgotadas de fato: `rejected` ou
+overage em uso). Medição `unknown` nunca trava: sonda morta é motivo pra
+liberar, não pra parar. Histerese conta medições (duas seguidas pra mudar,
+economia segura 15 min); entrar e sair de trava é imediato porque é fato
+medido. Override com validade: `regime livre --por 30m`, `regime economia
+--por 1h`, `regime auto`. Saída TOON, `--json` pra programa. Dezessete
+cenários sem rede em `tests/regime-scenarios.sh`.
+
+Quem lê a palavra:
+
+| Leitor | O que faz |
+|---|---|
+| `~/.claude/hooks/guard-quota-regime.js` (PreToolUse em Agent e Workflow) | economia: subagente em Fable ou Opus sai em sonnet, workflow com Fable/Opus ou mais de 3 `agent()` é negado; atenção e pouso: workflow acima de 6 `agent()` pede confirmação; trava: nega os dois com o horário do reset |
+| `~/.claude/hooks/quota-regime-context.js` (UserPromptSubmit) | uma linha no prompt quando não está livre, pra sessão adiar o pesado sozinha |
+| statusline | cadeado ao lado do velocímetro em economia (cor do ponteiro) e trava (vermelho) |
+| `claude-account exec` | em economia ou trava a sessão nova abre com `--effort medium`; `--effort` explícito manda |
+
+O que a simulação com dados reais (7 dias de transcripts do Studio calibrados
+contra 43 medições) mostrou e decidiu o desenho: só a média da janela, sem
+misturar os últimos 15 min na projeção (a mistura fazia a reserva oscilar de
+−102 a +8 em meia hora); piso de 24 h na semanal; e o objetivo muda por conta,
+porque a proteauto tem overage `allowed` (acima de 100% cobra) e a leo-iacall
+tem `rejected` (trava seco). Ordem de gasto: primária até 95%, reserva, e
+overage só quando as duas estão sem nada. Nas duas manhãs da semana que
+passaram de 100% (139% e 111%), economia teria entrado 3 h antes e, com os
+subagentes Opus/Fable em Sonnet, os picos ficariam perto de 56% e 34%.
+
+Instalado nos três Macs (hooks registrados no `settings.json` de cada um,
+backup `settings.json.bak-quota-regime*`). O que fica fora: a sessão já aberta
+não tem o effort trocado de fora (o Claude Code não expõe), e a node02 e o
+Mini continuam com a lógica de failover do Jarvis, sem regime.

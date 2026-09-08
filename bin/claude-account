@@ -386,9 +386,23 @@ apply_profile_env() {
   esac
 }
 
+# In economia the new session starts with --effort medium (the running session
+# cannot be changed from outside; the hooks handle subagents and workflows).
+# An explicit --effort on the command line always wins.
+regime_effort_args() {
+  case " $* " in *" --effort "*|*" --effort="*) return ;; esac
+  local bin="$(dirname "$0")/claude-account-regime" r
+  [ -x "$bin" ] || return
+  r="$("$bin" --json 2>/dev/null | jq -r '.regime // ""' 2>/dev/null)" || return
+  case "$r" in economia|trava) printf -- '--effort medium' ;; esac
+}
+
 cmd_exec() {
   apply_profile_env
-  exec "$NATIVE_BIN" "$@"
+  local extra; extra="$(regime_effort_args "$@")"
+  [ -n "$extra" ] && note "cota em regime de economia: sessão abre com --effort medium (passe --effort pra mandar)" >&2
+  # shellcheck disable=SC2086
+  exec "$NATIVE_BIN" $extra "$@"
 }
 
 cmd_probe() {
