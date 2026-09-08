@@ -80,6 +80,21 @@ runs=$((runs+1)); if [ "$h1" = "$h2" ] && [ "$h1" != 0 ] && [ "$h1" != null ]; t
 # 11d. a plain read never rewrites the state file
 setup; measure 20 7200 12 400000 allowed false 0 9 allowed; tick; m1=$(stat -f %m "$H/regime.state.json"); sleep 1.1; tick; m2=$(stat -f %m "$H/regime.state.json")
 runs=$((runs+1)); if [ "$m1" = "$m2" ]; then printf 'ok   %-58s\n' "a read without a new measurement does not rewrite the state"; else printf 'FAIL state rewritten without change\n'; fails=$((fails+1)); fi
+# 11e. the running session's own token decides which account is measured, not the
+# active file: a switch never moves a session that is already running.
+setup; measure 60 12600 12 400000 allowed false 0 9 allowed
+printf 'personal' > "$H/active"
+printf '%s work\n' "$(printf 'tok-of-preferred' | shasum -a 256 | cut -c1-12)" > "$H/fp-cache"
+runs=$((runs + 1))
+with=$(CLAUDE_CODE_OAUTH_TOKEN='tok-of-preferred' "$REGIME" --json)
+if [ "$(printf '%s' "$with" | jq -r .conta)" = work ] && [ "$(printf '%s' "$with" | jq -r .reserva_5h)" -lt 0 ]; then
+  printf 'ok   %-58s %s\n' "session token picks its own account and numbers" "work"
+else printf 'FAIL %-58s got %s\n' "session token picks its own account and numbers" "$(printf '%s' "$with" | jq -c '{conta,reserva_5h}')"; fails=$((fails + 1)); fi
+runs=$((runs + 1))
+without=$("$REGIME" --json)
+if [ "$(printf '%s' "$without" | jq -r .conta)" = personal ]; then
+  printf 'ok   %-58s %s\n' "no token in the environment falls back to the active file" "personal"
+else printf 'FAIL %-58s got %s\n' "no token in the environment falls back to the active file" "$(printf '%s' "$without" | jq -r .conta)"; fails=$((fails + 1)); fi
 # 12. young window (10 min elapsed) and calm week: livre
 setup; measure 3 17400 12 400000 allowed false 0 9 allowed; expect "young window, no pace yet" livre
 

@@ -102,7 +102,34 @@ policy=$(load_json "$POLICY")
 measure=$(load_json "$MEASURE")
 state=$(load_json "$STATE")
 override=$(load_json "$OVERRIDE")
-active=""; [ -f "$ACTIVE_FILE" ] && active=$(tr -d '[:space:]' < "$ACTIVE_FILE")
+# Which account THIS process actually uses, not the one marked active. A switch
+# never touches a running session (the token rides in the environment from
+# birth), so a session that started before the switch must be measured against
+# the account it really talks to, otherwise a hook brakes on the wrong numbers.
+# Fingerprints are cached: this runs on every Agent and Workflow call.
+FP_CACHE="$CONFIG_DIR/fp-cache"
+account_from_env() {
+  REPLY=""
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || return 0
+  local fp; fp=$(printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" | shasum -a 256 | cut -c1-12)
+  REPLY=$(grep "^${fp} " "$FP_CACHE" 2>/dev/null | head -1 | cut -d' ' -f2 || true)
+  [ -n "$REPLY" ] && return 0
+  local pf svc v
+  for pf in "$CONFIG_DIR"/profiles/*.json; do
+    [ -f "$pf" ] || continue
+    [ "$(jq -r '.type' "$pf" 2>/dev/null)" = oauth_token ] || continue
+    svc=$(jq -r '.keychainService' "$pf" 2>/dev/null) || continue
+    v=$(security find-generic-password -a "$USER" -s "$svc" -w 2>/dev/null) || continue
+    if [ "$(printf '%s' "$v" | shasum -a 256 | cut -c1-12)" = "$fp" ]; then
+      REPLY=$(jq -r '.name' "$pf"); printf '%s %s\n' "$fp" "$REPLY" >> "$FP_CACHE"
+      break
+    fi
+  done
+  unset v
+  return 0
+}
+account_from_env; active="$REPLY"
+[ -z "$active" ] && [ -f "$ACTIVE_FILE" ] && active=$(tr -d '[:space:]' < "$ACTIVE_FILE")
 
 result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$measure" \
   --argjson state "$state" --argjson override "$override" --arg active "$active" '
@@ -167,7 +194,7 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
   (($override.until // 0) > $now) as $ov |
   ($age_min == null or $age_min > $stale_min) as $stale |
   (if $ov then $override.regime elif $stale then "livre" else $settled end) as $final |
-  {regime: $final, raw: $raw, causa: (if $final == "livre" then "" else $causa end),
+  {regime: $final, raw: $raw, conta_de: (if $active != "" then "sessao" else "perfil ativo" end), causa: (if $final == "livre" then "" else $causa end),
    reserva: $res, reserva_5h: $r5, reserva_7d: $r7,
    reset: $reset, reset_em: (if $reset == null then null else ($reset - $now) end),
    conta: $acct, marca: (if $acct == $pref then 1 else 2 end),
