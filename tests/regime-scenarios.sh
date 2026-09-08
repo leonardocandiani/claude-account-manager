@@ -53,6 +53,8 @@ setup; measure 91 2100 40 200000 allowed false 96 9 rejected "71 75 79 83 87 91"
 setup; measure 88 600 40 200000 allowed false 96 9 rejected "80 82 84 86 88 88"; tick; measure 90 300 40 200000 allowed false 96 9 rejected "82 84 86 88 90 90" 30; expect "90% faltando 5 min: atencao, sem freio" atencao
 # 7. trava: active paying overage, other rejected (immediate, no hysteresis)
 setup; measure 100 3000 50 200000 allowed true 98 30 rejected; expect "trava: overage na ativa e reserva esgotada" trava
+# 7a. leaving trava is immediate once both accounts measure allowed again
+setup; measure 100 3000 50 200000 allowed true 98 30 rejected; tick; measure 20 7200 12 400000 allowed false 0 9 allowed "" 30; expect "sai de trava na primeira medição boa" livre
 # 7b. dead probe on both (unknown, null usage) is never trava
 setup; jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{measured_at:$at, profiles:{proteauto:{status:"unknown"}, "leo-iacall":{status:"unknown"}}, history:{}}' > "$H/measure.json"; expect "sonda morta nas duas: livre, nunca trava" livre
 # 8. weekly rules: 5h calm, 7d 88% with 2d21h left

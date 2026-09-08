@@ -142,10 +142,10 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    elif $pool_softens and $pool_room then "atencao"
    else "economia" end) as $raw |
   (if $causa == "5h" then $p.reset_5h elif $causa == "7d" then $p.reset_7d else null end) as $reset |
-  # --- hysteresis: advance only on a measurement not seen before; trava is immediate ---
+  # --- hysteresis: advance only on a measurement not seen before; trava is immediate both ways (measured fact) ---
   ($state.regime // "livre") as $cur |
   (if ($state.last_measured_at // "") == $mat then $state
-   elif $raw == "trava" or $raw == $cur then $state + {regime: $raw, pending: null, pending_n: 0, since: ($state.since // $now), last_measured_at: $mat}
+   elif $raw == "trava" or $cur == "trava" or $raw == $cur then $state + {regime: $raw, pending: null, pending_n: 0, since: (if $raw == $cur then ($state.since // $now) else $now end), last_measured_at: $mat, hold_until: 0}
    else
      (if $state.pending == $raw then ($state.pending_n // 0) + 1 else 1 end) as $n |
      (($cur == "economia") and (($state.hold_until // 0) > $now)) as $held |
