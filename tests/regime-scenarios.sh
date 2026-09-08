@@ -6,9 +6,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 REGIME="$here/../bin/claude-account-regime"
 now=$(date -u +%s)
 fails=0; runs=0
+# The runner's own session token must not leak into the cases (11e sets it on purpose).
+unset CLAUDE_CODE_OAUTH_TOKEN
+homes=()
+trap 'rm -rf "${homes[@]}"' EXIT
 
 setup() {  # fresh home with policy and active account
-  H="$(mktemp -d)"; export CLAUDE_ACCOUNT_HOME="$H"
+  H="$(mktemp -d)"; export CLAUDE_ACCOUNT_HOME="$H"; homes+=("$H")
   printf '{"preferred":"work","fallback":"personal","regime":{"hyst":2,"hold_min":15}}' > "$H/policy.json"
   printf 'work' > "$H/active"
 }
@@ -18,7 +22,8 @@ measure() {
   local at; at=$(date -u -r $(( now - age )) +%Y-%m-%dT%H:%M:%SZ)
   local h='[]'
   if [ -n "$hist" ]; then
-    h=$(python3 -c "import json,sys; us=[int(x) for x in sys.argv[1].split()]; n=int(sys.argv[2]); print(json.dumps([[n-300*(len(us)-i), u] for i,u in enumerate(us)]))" "$hist" "$now")
+    # samples 5 min apart, the last one at now-300: [[ts, util], ...]
+    h=$(printf '%s' "$hist" | jq -R -c --argjson n "$now" 'split(" ") | map(select(length > 0) | tonumber) | length as $k | to_entries | map([$n - 300 * ($k - .key), .value])')
   fi
   jq -n --arg at "$at" --argjson n "$now" --argjson u5 "$1" --argjson l5 "$2" --argjson u7 "$3" --argjson l7 "$4" --arg st "$5" --argjson ov "$6" \
         --argjson o5 "$7" --argjson o7 "$8" --arg ost "$9" --argjson h "$h" '
@@ -34,7 +39,6 @@ expect() {  # <name> <expected regime>
   else printf 'FAIL %-58s expected %s, got %s\n' "$1" "$2" "$got"; "$REGIME"; fails=$((fails + 1)); fi
 }
 tick() { "$REGIME" --json >/dev/null; }   # one read = one measurement consumed
-newmeasure() { measure "$@"; }            # same args, new measured_at happens via age
 
 # 1. livre: 20% with 2h left (60% elapsed), weekly calm
 setup; measure 20 7200 12 400000 allowed false 0 9 allowed; expect "livre: 20% with 2h left" livre

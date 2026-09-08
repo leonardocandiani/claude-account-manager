@@ -35,3 +35,13 @@ echo "setups), route it through the profile: CLAUDE_NATIVE_BIN=\"\$bin\" \"\$HOM
 echo "Otherwise add to ~/.zprofile:"
 # shellcheck disable=SC2016
 printf '  [ -r "$HOME/.local/lib/claude-account-manager/shell-init.zsh" ] && source "$HOME/.local/lib/claude-account-manager/shell-init.zsh"\n'
+echo
+echo "Automatic switching is opt-in: write $CONFIG/policy.json and schedule"
+echo "$BIN/claude-account-autoswitch every 5 minutes (launchd or cron); see README."
+
+resolved="$(command -v claude 2>/dev/null || true)"
+if [ "$resolved" != "$BIN/claude" ]; then
+  echo
+  echo "WARNING: 'claude' currently resolves to: ${resolved:-nothing}"
+  echo "Make sure $BIN comes BEFORE it in your PATH, otherwise the profile wrapper never runs."
+fi

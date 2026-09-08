@@ -2,8 +2,8 @@
 # claude-account-regime: what the quota allows RIGHT NOW, as one word.
 #
 # One rule, many readers. The Claude Code hooks (Agent/Workflow guards), the
-# prompt context line, the status line, the session launcher and the segsclaw
-# fabric all ask this command instead of each doing its own arithmetic.
+# prompt context line, the status line, the session launcher and any other
+# automation all ask this command instead of each doing its own arithmetic.
 #
 # The rule is the same projection the status line gauge uses: for each window
 # (5h, 7d) of the ACTIVE account, project where usage lands at reset from the
