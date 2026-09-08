@@ -40,6 +40,19 @@ if [ -f "$PLIST" ]; then
       && echo "keychain: token for $name stored (fp $(fp "$v"))"
     unset v
   done
+elif [ -f "$HOME/.config/claude-account/.tokens-import" ]; then
+  # Machine without the agent plist: tokens delivered in a 600 file with lines
+  # "<profile> <token>", consumed and shredded here.
+  while read -r name v; do
+    [ -n "$name" ] && [ -n "$v" ] || continue
+    case "$(fp "$v")" in
+      "$FP_PROTEAUTO"|"$FP_LEO") ;;
+      *) echo "token for $name has unknown fingerprint $(fp "$v"); skipped"; continue ;;
+    esac
+    security add-generic-password -U -a "$USER" -s "Claude Code OAuth Token - $name" -w "$v" >/dev/null \
+      && echo "keychain: token for $name stored from import file (fp $(fp "$v"))"
+  done < "$HOME/.config/claude-account/.tokens-import"
+  rm -P "$HOME/.config/claude-account/.tokens-import" 2>/dev/null || rm -f "$HOME/.config/claude-account/.tokens-import"
 else
   echo "no whatsapp-agent plist here; expecting tokens already in the Keychain"
 fi
@@ -76,10 +89,12 @@ else
 fi
 
 POLICY="$HOME/.config/claude-account/policy.json"
-[ -f "$POLICY" ] || cat > "$POLICY" <<'EOF'
+PREF="${CLAUDE_ACCOUNT_PREFERRED:-proteauto}"
+FALL=leo-iacall; [ "$PREF" = leo-iacall ] && FALL=proteauto
+[ -f "$POLICY" ] || cat > "$POLICY" <<EOF
 {
-  "preferred": "proteauto",
-  "fallback": "leo-iacall",
+  "preferred": "$PREF",
+  "fallback": "$FALL",
   "exhausted_at": { "five_hour": 0.95, "seven_day": 0.97 },
   "return_below": { "five_hour": 0.70, "seven_day": 0.90 },
   "min_switch_interval_min": 10,
@@ -120,7 +135,7 @@ cat > "$AGENT" <<EOF
 </plist>
 EOF
 
-active="${native:-proteauto}"
+active="${native:-$PREF}"
 "$CA" use "$active"
 "$CA" list
 "$CA" status

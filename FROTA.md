@@ -134,3 +134,34 @@ o `policy.json` e um plist igual ao do Claude chamando `codex-account
 autoswitch`. O home do Orca em `~/Library/Application Support/orca/
 codex-runtime-home/home/auth.json` é uma cópia parada em 24/08 da mesma
 conta e não é o que o autoreview usa hoje (ele roda com o home padrão).
+
+## MacBook Pro e node02 (08/09/2026, segunda rodada)
+
+**MacBook Pro** (`leonardolima`): login nativo lá é candiani@iacall.ai, então
+virou o perfil `leo-iacall` (native_archive) e `proteauto` entrou por
+setup-token. Política invertida por `CLAUDE_ACCOUNT_PREFERRED=leo-iacall` no
+`setup-frota.sh`: preferida `leo-iacall`, fallback `proteauto`. Sem plist de
+agent lá, os tokens foram entregues num arquivo 600
+(`~/.config/claude-account/.tokens-import`, duas linhas `perfil token`), que o
+setup consome, confere por fingerprint e apaga. A função `claude()` do
+`.zshrc` de lá injeta `--dangerously-skip-permissions` (não o canal
+claude-peers) e recebeu o mesmo roteamento por `claude-account exec`.
+
+**node02** (Minino Jarvis em produção, Linux, sem Keychain nem launchd): o
+segsclaw de lá já carrega o failover por índice (`claude-account-failover.ts`),
+mas estava com as DUAS variáveis apontando pro mesmo token (leo-iacall) e o
+probe nunca rodou por timer (último log manual em 18/08). Corrigido sem
+reiniciar nada: `CLAUDE_CODE_OAUTH_TOKEN_FALLBACK` no env do segsclaw agora é
+o token da `proteauto` (backup `.bak-claude-account-<data>` ao lado), e o
+probe roda por `claude-account-probe.timer` (systemd, 5 min, wrapper em
+`/root/.segsclaw/claude-account-probe.sh` que extrai os tokens do mesmo env
+que o `vps-live.sh` usa). O serviço vivo só lê o env novo na próxima subida;
+o `sincronizar-deploy.ts` reinicia sozinho em janela ociosa quando há deploy,
+ou `systemctl restart segsclaw.service` na mão. Até lá o índice 1 cai no
+mesmo token de antes (sem regressão). Política lá:
+`~/.segsclaw/claude-accounts.config.json` com `preferred: proteauto`.
+
+**Statusline** (bloco 5: conta que a sessão usa, 5h e 7d da conta, versão com
+cor contra o npm e link pra release): Studio, Mini (cópia inteira, base
+idêntica) e MacBook (patch por âncora, `patch-statusline.py`, porque a
+statusline de lá diverge em 70 linhas).
