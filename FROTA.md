@@ -98,3 +98,39 @@ Observação: o plist `com.segsclaw.claude-account-probe` do Mini tem os dois
 tokens em ordem invertida em relação ao `com.claude.whatsapp-agent`, e os
 rótulos do state (`~/.segsclaw/claude-accounts.json`) saem trocados por isso.
 O roteamento por índice funciona; só o nome no log está errado.
+
+## Codex: `codex-account` (protótipo, uma conta só até agora)
+
+Mapeado em 08/09/2026 no codex-cli 0.150.1 (fork do Orca): não existe
+multi-conta nativa; a auth mora em `$CODEX_HOME/auth.json` (default
+`~/.codex`, modo 600, com access, refresh e id_token, mais `account_id` e
+`last_refresh`); `CODEX_HOME` isola um home inteiro por conta; o uso sai de
+`GET https://chatgpt.com/backend-api/wham/usage` com `authorization: Bearer
+<access_token>` e `ChatGPT-Account-Id: <account_id>`, campo
+`rate_limit.primary_window.used_percent` (no plano Pro a janela primária é a
+semanal de 604800 s; `secondary_window` vem nula) mais `limit_reached` e
+`allowed`. O refresh acontece dentro do codex em
+`auth.openai.com/oauth/token`; o `codex-account` nunca renova por fora, porque
+uma renovação paralela poderia invalidar o refresh token vivo.
+
+`~/bin/codex-account`: `import <nome>` salva o `auth.json` vivo como perfil
+(um `CODEX_HOME` completo em `~/.config/codex-account/homes/<nome>/`, com
+symlink pro `config.toml` compartilhado), `use <nome>` arquiva o vivo no
+perfil dono e copia o do alvo pra `~/.codex/auth.json`, `measure` lê o uso de
+cada perfil (perfil deslocado com token vencido passa por `codex login status`
+no próprio home antes de tentar de novo), `exec` roda o codex com o
+`CODEX_HOME` do perfil ativo, e `autoswitch [--dry-run]` aplica a mesma
+política do Claude com `policy.json` em `~/.config/codex-account/`
+(percentuais de 0 a 100 aqui: `exhausted_at.primary`, `return_below.primary`).
+
+Validado com a conta existente (candiani@iacall.ai, Pro): import, status,
+measure (7% da semana), `use` idempotente, `exec login status`, flag inválida
+com exit 2. Não validado, por só haver uma conta ChatGPT logada: a troca real
+entre duas contas, o comportamento do refresh do perfil deslocado e o
+autoswitch de verdade. Pra fechar: logar a segunda conta (`codex logout` e
+`codex login` nela, ou `codex login --with-access-token` lendo do stdin),
+`codex-account import <nome2>`, `codex-account use iacall` pra voltar, criar
+o `policy.json` e um plist igual ao do Claude chamando `codex-account
+autoswitch`. O home do Orca em `~/Library/Application Support/orca/
+codex-runtime-home/home/auth.json` é uma cópia parada em 24/08 da mesma
+conta e não é o que o autoreview usa hoje (ele roda com o home padrão).

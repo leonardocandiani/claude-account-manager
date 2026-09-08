@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# Profile manager for multiple Codex CLI (ChatGPT) accounts, same shape as
+# claude-account. Prototype built 2026-09-08 from what was measured on
+# codex-cli 0.150.1:
+#   - auth lives in $CODEX_HOME/auth.json (default ~/.codex), mode 600, with
+#     tokens.access_token / refresh_token / id_token / account_id and last_refresh
+#   - no native multi-account; CODEX_HOME isolates a whole home per account
+#   - usage: GET https://chatgpt.com/backend-api/wham/usage with
+#     "authorization: Bearer <access_token>" and "ChatGPT-Account-Id: <account_id>"
+#     returns rate_limit.primary_window.used_percent (+ secondary_window)
+#   - refresh happens inside codex (auth.openai.com/oauth/token); this tool never
+#     refreshes out of band, so a displaced profile only refreshes when it is
+#     active again, or when `codex login status` runs in its own CODEX_HOME.
+#
+# Each profile is a full CODEX_HOME under ~/.config/codex-account/homes/<name>/:
+# its own auth.json plus a symlink to the shared config.toml. `use` copies the
+# profile's auth.json into ~/.codex/auth.json after archiving the live one back
+# into the profile that owns it (so a refreshed token is never lost).
+set -euo pipefail
+
+CONFIG_DIR="${CODEX_ACCOUNT_HOME:-$HOME/.config/codex-account}"
+HOMES_DIR="$CONFIG_DIR/homes"
+ACTIVE_FILE="$CONFIG_DIR/active"
+LIVE_HOME="${CODEX_HOME:-$HOME/.codex}"
+LIVE_AUTH="$LIVE_HOME/auth.json"
+USAGE_URL="https://chatgpt.com/backend-api/wham/usage"
+POLICY="$CONFIG_DIR/policy.json"
+STATE="$CONFIG_DIR/autoswitch-state.json"
+LOG="$CONFIG_DIR/autoswitch.log"
+OFF="$CONFIG_DIR/autoswitch.off"
+
+die() { printf 'codex-account: ERROR: %s\n' "$*" >&2; exit 1; }
+usage_error() { printf 'codex-account: ERROR: %s\n' "$*" >&2; exit 2; }
+note() { printf 'codex-account: %s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+
+ensure_base() {
+  mkdir -p "$HOMES_DIR"
+  chmod 700 "$CONFIG_DIR" "$HOMES_DIR" 2>/dev/null || true
+  need jq; need curl; need codex
+}
+
+validate_name() {
+  case "${1:-}" in
+    ''|*[!a-zA-Z0-9._-]*) usage_error "invalid profile name: use letters, digits, dot, _ or -" ;;
+  esac
+}
+
+profile_home() { printf '%s/%s' "$HOMES_DIR" "$1"; }
+profile_auth() { printf '%s/%s/auth.json' "$HOMES_DIR" "$1"; }
+active_name() { [ -f "$ACTIVE_FILE" ] || return 1; tr -d '[:space:]' < "$ACTIVE_FILE"; }
+set_active() {
+  tmp="$(mktemp "$CONFIG_DIR/.active.XXXXXX")"; printf '%s\n' "$1" > "$tmp"; chmod 600 "$tmp"; mv "$tmp" "$ACTIVE_FILE"
+}
+fingerprint() { shasum -a 256 < "$1" | cut -c1-12; }
+auth_email() {
+  jq -r '.tokens.id_token // empty' "$1" | python3 -c '
+import sys, base64, json
+t = sys.stdin.read().strip().split(".")
+if len(t) < 2: sys.exit(0)
+p = t[1] + "=" * (-len(t[1]) % 4)
+try: print(json.loads(base64.urlsafe_b64decode(p)).get("email", ""))
+except Exception: pass' 2>/dev/null || true
+}
+auth_account_id() { jq -r '.tokens.account_id // empty' "$1"; }
+
+# Copy auth atomically with mode 600 (auth.json is a secret file).
+copy_auth() {
+  src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  tmp="$(mktemp "$(dirname "$dst")/.auth.XXXXXX")"
+  cp "$src" "$tmp"; chmod 600 "$tmp"; mv "$tmp" "$dst"
+}
+
+ensure_profile_home() {
+  h="$(profile_home "$1")"
+  mkdir -p "$h"; chmod 700 "$h"
+  [ -e "$h/config.toml" ] || ln -s "$LIVE_HOME/config.toml" "$h/config.toml"
+}
+
+# The live auth.json refreshes itself while active; archive it back into the
+# profile that owns it before anything replaces it.
+refresh_archive_of_active() {
+  current="$(active_name 2>/dev/null || true)"
+  [ -n "$current" ] && [ -f "$LIVE_AUTH" ] || return 0
+  [ -d "$(profile_home "$current")" ] || return 0
+  live_id="$(auth_account_id "$LIVE_AUTH")"
+  own_id="$(auth_account_id "$(profile_auth "$current")" 2>/dev/null || true)"
+  if [ -n "$own_id" ] && [ "$live_id" != "$own_id" ]; then
+    note "live auth.json belongs to another account than profile '$current'; not archiving over it"
+    return 0
+  fi
+  copy_auth "$LIVE_AUTH" "$(profile_auth "$current")"
+}
+
+cmd_import() {
+  name="${1:-}"; validate_name "$name"
+  [ -f "$LIVE_AUTH" ] || die "no live auth.json at $LIVE_AUTH (run codex login first)"
+  ensure_profile_home "$name"
+  copy_auth "$LIVE_AUTH" "$(profile_auth "$name")"
+  [ -f "$ACTIVE_FILE" ] || set_active "$name"
+  note "profile '$name' imported ($(auth_email "$LIVE_AUTH"), account $(auth_account_id "$LIVE_AUTH"))"
+}
+
+cmd_use() {
+  name="${1:-}"; validate_name "$name"
+  [ -f "$(profile_auth "$name")" ] || die "profile does not exist: $name"
+  current="$(active_name 2>/dev/null || true)"
+  refresh_archive_of_active
+  if [ ! -f "$LIVE_AUTH" ] || [ "$(fingerprint "$LIVE_AUTH")" != "$(fingerprint "$(profile_auth "$name")")" ]; then
+    copy_auth "$(profile_auth "$name")" "$LIVE_AUTH"
+  fi
+  set_active "$name"
+  if [ "$current" = "$name" ]; then
+    note "active profile: $name, unchanged"
+  else
+    note "active profile: $name; new codex processes use it, running ones keep '${current:-none}'"
+  fi
+}
+
+cmd_list() {
+  active="$(active_name 2>/dev/null || true)"; found=false
+  for d in "$HOMES_DIR"/*/; do
+    [ -f "$d/auth.json" ] || continue; found=true
+    n="$(basename "$d")"; mark=' '; [ "$n" = "$active" ] && mark='*'
+    printf '%s %-16s %s\n' "$mark" "$n" "$(auth_email "$d/auth.json")"
+  done
+  [ "$found" = true ] || note "no profiles registered (0 profiles)"
+}
+
+cmd_status() {
+  active="$(active_name 2>/dev/null || true)"; [ -n "$active" ] || die "no active profile"
+  printf 'profile=%s\nemail=%s\naccount_id=%s\n' "$active" "$(auth_email "$(profile_auth "$active")")" "$(auth_account_id "$(profile_auth "$active")")"
+  printf 'profile_fingerprint=%s\n' "$(fingerprint "$(profile_auth "$active")")"
+  if [ -f "$LIVE_AUTH" ]; then
+    printf 'live_fingerprint=%s\nlive_account_id=%s\nlive_last_refresh=%s\n' \
+      "$(fingerprint "$LIVE_AUTH")" "$(auth_account_id "$LIVE_AUTH")" "$(jq -r '.last_refresh // ""' "$LIVE_AUTH")"
+  else
+    echo 'live=absent'
+  fi
+}
+
+usage_fetch() {
+  auth="$1"
+  tok="$(jq -r '.tokens.access_token // empty' "$auth")"; acct="$(auth_account_id "$auth")"
+  [ -n "$tok" ] || { printf '000\n'; return 0; }
+  curl -s -o "$2" -w '%{http_code}' --max-time 20 "$USAGE_URL" \
+    -H "authorization: Bearer $tok" -H "ChatGPT-Account-Id: $acct" -H "accept: application/json" 2>/dev/null || printf '000'
+}
+
+# One line per profile: name,status,http,used_primary,reset_primary,used_secondary,reset_secondary,plan,measured_at
+measure_one() {
+  name="$1"; auth="$(profile_auth "$name")"
+  [ -f "$auth" ] || { printf '%s,unmeasurable,,,,,,,\n' "$name"; return 0; }
+  active="$(active_name 2>/dev/null || true)"
+  [ "$name" = "$active" ] && [ -f "$LIVE_AUTH" ] && auth="$LIVE_AUTH"
+  body="$(mktemp "${TMPDIR:-/tmp}/codex-account-usage.XXXXXX")"
+  http="$(usage_fetch "$auth" "$body")"
+  if [ "$http" = 401 ] && [ "$name" != "$active" ]; then
+    # Expired access token of a displaced profile: let codex refresh it inside
+    # its own home (no inference, no cost), then retry once.
+    CODEX_HOME="$(profile_home "$name")" codex login status >/dev/null 2>&1 || true
+    http="$(usage_fetch "$auth" "$body")"
+  fi
+  status=unknown; up=""; rp=""; us=""; rs=""; plan=""
+  if [ "$http" = 429 ]; then status=rejected
+  elif [ "$http" = 200 ]; then
+    plan="$(jq -r '.plan_type // ""' "$body")"
+    up="$(jq -r '.rate_limit.primary_window.used_percent // ""' "$body")"
+    rp="$(jq -r '.rate_limit.primary_window.reset_at // ""' "$body")"
+    us="$(jq -r '.rate_limit.secondary_window.used_percent // ""' "$body")"
+    rs="$(jq -r '.rate_limit.secondary_window.reset_at // ""' "$body")"
+    if [ "$(jq -r '.rate_limit.limit_reached // false' "$body")" = true ] || [ "$(jq -r '.rate_limit.allowed // true' "$body")" = false ]; then
+      status=rejected
+    else
+      status=allowed
+    fi
+  fi
+  rm -f "$body"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$name" "$status" "$http" "$up" "$rp" "$us" "$rs" "$plan" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+cmd_measure() {
+  names=()
+  if [ "$#" -gt 0 ]; then names=("$@"); else
+    for d in "$HOMES_DIR"/*/; do [ -f "$d/auth.json" ] && names+=("$(basename "$d")"); done
+  fi
+  [ "${#names[@]}" -gt 0 ] || { note "0 profiles to measure"; return 0; }
+  echo "profiles[${#names[@]}]{name,status,http,used_primary,reset_primary,used_secondary,reset_secondary,plan,measured_at}:"
+  for n in "${names[@]}"; do printf '  '; measure_one "$n"; done
+}
+
+cmd_exec() {
+  active="$(active_name 2>/dev/null || true)"; [ -n "$active" ] || die "no active profile"
+  CODEX_HOME="$(profile_home "$active")" exec codex "$@"
+}
+
+# Same policy shape as claude-account-autoswitch, percentages 0-100 here.
+cmd_autoswitch() {
+  dry=false
+  for a in "$@"; do case "$a" in --dry-run) dry=true ;; *) usage_error "unknown flag: $a" ;; esac; done
+  log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
+  [ -f "$POLICY" ] || { log "error=policy_missing path=$POLICY"; return 1; }
+  [ -e "$OFF" ] && { log "skip=kill_switch"; return 0; }
+  pref="$(jq -r '.preferred' "$POLICY")"; fall="$(jq -r '.fallback' "$POLICY")"
+  tp="$(jq -r '.exhausted_at.primary // 95' "$POLICY")"; bp="$(jq -r '.return_below.primary // 70' "$POLICY")"
+  min_int="$(jq -r '.min_switch_interval_min // 10' "$POLICY")"; max_day="$(jq -r '.max_switches_per_day // 12' "$POLICY")"
+  active="$(active_name 2>/dev/null || true)"
+  lp="$(measure_one "$pref")"; lf="$(measure_one "$fall")"
+  f() { printf '%s' "$1" | cut -d, -f"$2"; }
+  room() { [ "$(f "$1" 2)" = allowed ] || return 1; awk -v u="$(f "$1" 4)" -v t="$2" 'BEGIN{exit !((u+0) < (t+0))}'; }
+  decision="$active"; reason=stay
+  if [ "$active" = "$pref" ] || [ -z "$active" ]; then
+    if room "$lp" "$tp"; then decision="$pref"; reason=preferred_has_room
+    elif room "$lf" "$tp"; then decision="$fall"; reason=preferred_exhausted_fallback_has_room
+    else decision="$pref"; reason=both_exhausted_stay_preferred; fi
+  elif [ "$active" = "$fall" ]; then
+    if room "$lp" "$bp"; then decision="$pref"; reason=preferred_recovered
+    elif room "$lf" "$tp"; then decision="$fall"; reason=fallback_still_has_room
+    elif room "$lp" "$tp"; then decision="$pref"; reason=fallback_exhausted_preferred_has_room
+    else decision="$fall"; reason=both_exhausted_stay; fi
+  else decision="$active"; reason=manual_profile_active; fi
+  summary="active=$active decision=$decision reason=$reason pref=[$(f "$lp" 2)/$(f "$lp" 4)%] fall=[$(f "$lf" 2)/$(f "$lf" 4)%]"
+  [ "$decision" = "$active" ] && { log "$summary"; return 0; }
+  last_ts="$(jq -r '.lastSwitchAt // 0' "$STATE" 2>/dev/null || echo 0)"; today="$(date -u +%Y-%m-%d)"
+  count_today="$(jq -r --arg d "$today" 'if .day == $d then (.count // 0) else 0 end' "$STATE" 2>/dev/null || echo 0)"
+  now_epoch="$(date -u +%s)"
+  [ $((now_epoch - last_ts)) -lt $((min_int * 60)) ] && { log "$summary held=min_interval"; return 0; }
+  [ "$count_today" -ge "$max_day" ] && { log "$summary held=daily_cap($max_day)"; return 0; }
+  [ "$dry" = true ] && { log "$summary dry_run=would_switch"; return 0; }
+  if cmd_use "$decision" >/dev/null 2>&1; then
+    jq -n --arg d "$today" --argjson c $((count_today + 1)) --argjson t "$now_epoch" --arg from "$active" --arg to "$decision" --arg why "$reason" \
+      '{day:$d,count:$c,lastSwitchAt:$t,from:$from,to:$to,reason:$why}' > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+    log "$summary switched=$active->$decision"
+  else
+    log "$summary switch_failed"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-account import <name>        save the live ~/.codex/auth.json as a profile
+  codex-account use <name>           make that profile the live auth (archives the current one first)
+  codex-account list
+  codex-account status
+  codex-account measure [name...]    weekly/5h usage per profile from chatgpt.com (no secrets printed)
+  codex-account exec [args...]       run codex with CODEX_HOME set to the active profile's home
+  codex-account autoswitch [--dry-run]
+
+Exit codes: 0 ok, 1 error, 2 usage error.
+EOF
+}
+
+ensure_base
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  import) cmd_import "$@" ;;
+  use) cmd_use "$@" ;;
+  list) cmd_list "$@" ;;
+  status) cmd_status "$@" ;;
+  measure) cmd_measure "$@" ;;
+  exec) cmd_exec "$@" ;;
+  autoswitch) cmd_autoswitch "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; usage_error "unknown command: $cmd" ;;
+esac
