@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Scenario tests for claude-account-regime. Each case builds a measure.json in
+# a scratch CLAUDE_ACCOUNT_HOME and checks the regime word. Pure: no network.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+REGIME="$here/../bin/claude-account-regime"
+now=$(date -u +%s)
+fails=0; runs=0
+
+setup() {  # fresh home with policy and active account
+  H="$(mktemp -d)"; export CLAUDE_ACCOUNT_HOME="$H"
+  printf '{"preferred":"proteauto","fallback":"leo-iacall","regime":{"hyst":2,"hold_min":15}}' > "$H/policy.json"
+  printf 'proteauto' > "$H/active"
+}
+# measure <u5> <left5_s> <u7> <left7_s> <status> <overage_in_use> <o5> <o7> <ostatus> [hist "u1 u2 u3"] [age_s]
+measure() {
+  local age="${11:-60}" hist="${10:-}"
+  local at; at=$(date -u -r $(( now - age )) +%Y-%m-%dT%H:%M:%SZ)
+  local h='[]'
+  if [ -n "$hist" ]; then
+    h=$(python3 -c "import json,sys; us=[int(x) for x in sys.argv[1].split()]; n=int(sys.argv[2]); print(json.dumps([[n-300*(len(us)-i), u] for i,u in enumerate(us)]))" "$hist" "$now")
+  fi
+  jq -n --arg at "$at" --argjson n "$now" --argjson u5 "$1" --argjson l5 "$2" --argjson u7 "$3" --argjson l7 "$4" --arg st "$5" --argjson ov "$6" \
+        --argjson o5 "$7" --argjson o7 "$8" --arg ost "$9" --argjson h "$h" '
+    {measured_at: $at,
+     profiles: {proteauto: {status: $st, overage_in_use: $ov, util_5h: $u5, reset_5h: ($n + $l5), util_7d: $u7, reset_7d: ($n + $l7)},
+                "leo-iacall": {status: $ost, overage_in_use: false, util_5h: $o5, reset_5h: ($n + 18000), util_7d: $o7, reset_7d: ($n + 604800 - 86400)}},
+     history: {proteauto: $h}}' > "$H/measure.json"
+}
+expect() {  # <name> <expected regime>
+  runs=$((runs + 1))
+  local got; got=$("$REGIME" --json | jq -r .regime)
+  if [ "$got" = "$2" ]; then printf 'ok   %-58s %s\n' "$1" "$got"
+  else printf 'FAIL %-58s esperado %s, veio %s\n' "$1" "$2" "$got"; "$REGIME"; fails=$((fails + 1)); fi
+}
+tick() { "$REGIME" --json >/dev/null; }   # one read = one measurement consumed
+newmeasure() { measure "$@"; }            # same args, new measured_at happens via age
+
+# 1. livre: 20% with 2h left (60% elapsed), weekly calm
+setup; measure 20 7200 12 400000 allowed false 0 9 allowed; expect "livre: 20% com 2h restantes" livre
+# 2. atencao: on pace (50% at half window) -> reserve 0..25
+setup; measure 50 9000 30 300000 allowed false 0 9 allowed; tick; measure 51 8900 30 300000 allowed false 0 9 allowed "" 30; expect "atencao: 50% na metade da janela" atencao
+# 3. economia needs two measurements (hysteresis): 60% with 30% elapsed, fallback exhausted
+setup; measure 60 12600 40 200000 allowed false 96 9 rejected; expect "economia: 1ª medição ainda segura livre" livre
+measure 61 12500 40 200000 allowed false 96 9 rejected "" 30; expect "economia: 2ª medição confirma" economia
+# 4. same but fallback fresh: pool softens to atencao
+setup; measure 60 12600 40 200000 allowed false 0 9 allowed; tick; measure 61 12500 40 200000 allowed false 0 9 allowed "" 30; expect "pool com reserva amolece pra atencao" atencao
+# 5. pouso: 95% with 25 min left projects 104% on average pace, but recent pace is flat: fits
+setup; measure 95 1800 40 200000 allowed false 96 9 rejected "95 95 95 95 95 95"; tick; measure 95 1500 40 200000 allowed false 96 9 rejected "95 95 95 95 95 95" 30; expect "pouso: 95% faltando 25 min, ritmo recente parado" pouso
+# 6. no pouso when it does not fit: 95% with 25 min left and +4 pts per 5 min
+setup; measure 91 2100 40 200000 allowed false 96 9 rejected "71 75 79 83 87 91"; tick; measure 95 1500 40 200000 allowed false 96 9 rejected "75 79 83 87 91 95" 30; expect "sem pouso: 95% faltando 25 min e subindo 4 por 5 min" economia
+# 6b. 90% with 5 min left and heavy use: projection lands at 90, no brake at all
+setup; measure 88 600 40 200000 allowed false 96 9 rejected "80 82 84 86 88 88"; tick; measure 90 300 40 200000 allowed false 96 9 rejected "82 84 86 88 90 90" 30; expect "90% faltando 5 min: atencao, sem freio" atencao
+# 7. trava: active paying overage, other rejected (immediate, no hysteresis)
+setup; measure 100 3000 50 200000 allowed true 98 30 rejected; expect "trava: overage na ativa e reserva esgotada" trava
+# 8. weekly rules: 5h calm, 7d 88% with 2d21h left
+setup; measure 12 12000 88 250000 allowed false 96 9 rejected; tick; measure 12 11900 88 249900 allowed false 96 9 rejected "" 30; expect "economia pela semanal" economia
+[ "$("$REGIME" --json | jq -r .causa)" = 7d ] && printf 'ok   %-58s 7d\n' "causa da semanal" || { printf 'FAIL causa esperada 7d\n'; fails=$((fails+1)); }
+# 9. stale measurement: economia numbers but 40 min old -> livre with warning
+setup; measure 60 12600 40 200000 allowed false 96 9 rejected "" 2400; expect "medida velha vira livre" livre
+"$REGIME" | grep -q 'aviso: medida com' && printf 'ok   %-58s\n' "aviso de medida velha impresso" || { printf 'FAIL sem aviso de medida velha\n'; fails=$((fails+1)); }
+# 10. override wins
+setup; measure 20 7200 12 400000 allowed false 0 9 allowed; "$REGIME" economia --por 10m >/dev/null; expect "override economia" economia
+"$REGIME" auto >/dev/null; expect "override removido" livre
+# 11. hold: economia settled must hold 15 min even if the next two measurements say livre
+setup; measure 60 12600 40 200000 allowed false 96 9 rejected; tick; measure 61 12500 40 200000 allowed false 96 9 rejected "" 30; tick
+measure 5 12400 10 200000 allowed false 96 9 rejected "" 20; tick; measure 5 12300 10 200000 allowed false 96 9 rejected "" 10; expect "economia segura 15 min" economia
+# 12. young window (10 min elapsed) and calm week: livre
+setup; measure 3 17400 12 400000 allowed false 0 9 allowed; expect "janela nova sem ritmo" livre
+
+printf '\n%d casos, %d falhas\n' "$runs" "$fails"
+[ "$fails" -eq 0 ]

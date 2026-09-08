@@ -467,6 +467,7 @@ Usage:
   claude-account probe
   claude-account measure [name...]                  rate-limit state per profile (headers, no secrets)
   claude-account exec [args...]                     run the native binary under the active profile
+  claude-account regime [--json|livre|economia|auto] what the quota allows right now (see claude-account-regime --help)
 
 Exit codes: 0 ok, 1 error, 2 usage error.
 Override the native binary path with CLAUDE_NATIVE_BIN=/path/to/claude.
@@ -486,6 +487,7 @@ case "$command_name" in
   probe) cmd_probe "$@" ;;
   measure) cmd_measure "$@" ;;
   exec) cmd_exec "$@" ;;
+  regime) exec "$(dirname "$0")/claude-account-regime" "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; usage_error "unknown command: $command_name" ;;
 esac

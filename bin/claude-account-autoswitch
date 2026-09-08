@@ -69,10 +69,12 @@ printf '%s\n' "$measured" | jq -R -s --arg at "$(now_iso)" --argjson ts "$(date 
   split("\n") | map(select(length > 0) | split(",")) |
   map({key: .[0], value: {status: .[1], util_5h: ((.[3] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
        reset_5h: (.[4] | tonumber? // null), util_7d: ((.[5] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
-       reset_7d: (.[6] | tonumber? // null)}}) | from_entries as $p |
+       reset_7d: (.[6] | tonumber? // null), overage: (.[7] // null), overage_in_use: (.[8] == "true")}}) | from_entries as $p |
   {measured_at: $at, profiles: $p,
    history: ($p | to_entries | map({key: .key, value: ((($hist[.key] // []) + [[$ts, .value.util_5h]]) | .[-24:])}) | from_entries)}' \
   > "$MEASURE_CACHE.tmp" 2>/dev/null && mv "$MEASURE_CACHE.tmp" "$MEASURE_CACHE"
+# Every measurement advances the regime (hysteresis counts measurements, not reads).
+"$(dirname "$CLI")/claude-account-regime" --json >/dev/null 2>&1 || true
 
 # room <line> <t5> <t7>: 0 when the account can take traffic under the thresholds.
 room() {
