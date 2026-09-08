@@ -69,6 +69,8 @@ setup; measure 20 7200 12 400000 allowed false 0 9 allowed; "$REGIME" economia -
 # 11. hold: economia settled must hold 15 min even if the next two measurements say livre
 setup; measure 60 12600 40 200000 allowed false 96 9 rejected; tick; measure 61 12500 40 200000 allowed false 96 9 rejected "" 30; tick
 measure 5 12400 10 200000 allowed false 96 9 rejected "" 20; tick; measure 5 12300 10 200000 allowed false 96 9 rejected "" 10; expect "economia segura 15 min" economia
+# 11b. junk state file never breaks a read
+setup; measure 20 7200 12 400000 allowed false 0 9 allowed; : > "$H/regime.state.json"; expect "estado vazio no disco: responde mesmo assim" livre
 # 12. young window (10 min elapsed) and calm week: livre
 setup; measure 3 17400 12 400000 allowed false 0 9 allowed; expect "janela nova sem ritmo" livre
 

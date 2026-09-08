@@ -91,10 +91,13 @@ if [ -n "$sub" ]; then
   exit 0
 fi
 
-policy='{}'; [ -f "$POLICY" ] && policy=$(cat "$POLICY")
-measure='{}'; [ -f "$MEASURE" ] && measure=$(cat "$MEASURE")
-state='{}'; [ -f "$STATE" ] && state=$(cat "$STATE")
-override='{}'; [ -f "$OVERRIDE" ] && override=$(cat "$OVERRIDE")
+# A broken or half-written file is treated as empty: the regime must answer
+# even when a concurrent writer left junk behind.
+load_json() { [ -f "$1" ] && jq -c . "$1" 2>/dev/null || echo '{}'; }
+policy=$(load_json "$POLICY")
+measure=$(load_json "$MEASURE")
+state=$(load_json "$STATE")
+override=$(load_json "$OVERRIDE")
 active=""; [ -f "$ACTIVE_FILE" ] && active=$(tr -d '[:space:]' < "$ACTIVE_FILE")
 
 result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$measure" \
@@ -168,7 +171,9 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    medido_ha_min: $age_min, medida_velha: $stale, pendente: ($ns.pending // null), pendente_n: ($ns.pending_n // 0),
    state: $ns}')
 
-printf '%s' "$result" | jq -c '.state' > "$STATE.tmp" 2>/dev/null && mv "$STATE.tmp" "$STATE"
+# Unique temp per process: two readers (launchd and a shell) may run at once.
+tmp="$STATE.$$.tmp"
+if printf '%s' "$result" | jq -c '.state' > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then mv "$tmp" "$STATE"; else rm -f "$tmp"; fi
 
 if [ $json -eq 1 ]; then
   printf '%s\n' "$result" | jq 'del(.state)'
