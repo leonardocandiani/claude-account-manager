@@ -61,13 +61,18 @@ field() { printf '%s' "$1" | cut -d, -f"$2"; }
 # Cache legivel da medicao (a statusline le daqui: o payload do Claude Code so
 # atualiza quando a propria sessao recebe resposta, entao fica velho em sessao
 # parada). Fracoes 0-1 dos headers viram 0-100 aqui.
+# Guarda tambem as ultimas 24 amostras (2h) de uso da janela de 5h por perfil:
+# e o que permite ler o PADRAO de consumo (sparkline e tendencia), nao so o nivel.
 MEASURE_CACHE="$CONFIG_DIR/measure.json"
-printf '%s\n' "$measured" | jq -R -s --arg at "$(now_iso)" '
+prev_hist="$(jq -c '.history // {}' "$MEASURE_CACHE" 2>/dev/null || echo '{}')"
+printf '%s\n' "$measured" | jq -R -s --arg at "$(now_iso)" --argjson ts "$(date -u +%s)" --argjson hist "$prev_hist" '
   split("\n") | map(select(length > 0) | split(",")) |
   map({key: .[0], value: {status: .[1], util_5h: ((.[3] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
        reset_5h: (.[4] | tonumber? // null), util_7d: ((.[5] | tonumber? // null) | if . == null then null else (. * 100 | round) end),
-       reset_7d: (.[6] | tonumber? // null)}}) | {measured_at: $at, profiles: from_entries}' > "$MEASURE_CACHE.tmp" 2>/dev/null \
-  && mv "$MEASURE_CACHE.tmp" "$MEASURE_CACHE"
+       reset_7d: (.[6] | tonumber? // null)}}) | from_entries as $p |
+  {measured_at: $at, profiles: $p,
+   history: ($p | to_entries | map({key: .key, value: ((($hist[.key] // []) + [[$ts, .value.util_5h]]) | .[-24:])}) | from_entries)}' \
+  > "$MEASURE_CACHE.tmp" 2>/dev/null && mv "$MEASURE_CACHE.tmp" "$MEASURE_CACHE"
 
 # room <line> <t5> <t7>: 0 when the account can take traffic under the thresholds.
 room() {
