@@ -24,6 +24,22 @@ install -m 700 "$ROOT/bin/claude-account-regime" "$BIN/claude-account-regime"
 install -m 700 "$ROOT/bin/claude" "$BIN/claude"
 install -m 600 "$ROOT/lib/shell-init.zsh" "$LIB/shell-init.zsh"
 
+# Optional wizard (Ink). Skipped without node; the CLI works the same without it.
+node_bin="$(command -v node || true)"
+[ -n "$node_bin" ] || for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && node_bin="$c" && break; done
+node_major="$([ -n "$node_bin" ] && "$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ -n "$node_bin" ] && [ "$node_major" -ge 20 ] 2>/dev/null; then
+  mkdir -p "$LIB/wizard"
+  install -m 600 "$ROOT/wizard/package.json" "$LIB/wizard/package.json"
+  install -m 600 "$ROOT/wizard/index.mjs" "$LIB/wizard/index.mjs"
+  [ -f "$ROOT/wizard/package-lock.json" ] && install -m 600 "$ROOT/wizard/package-lock.json" "$LIB/wizard/package-lock.json"
+  (cd "$LIB/wizard" && PATH="$(dirname "$node_bin"):$PATH" "$(dirname "$node_bin")/npm" install --omit=dev --no-audit --no-fund --silent) \
+    && echo "Wizard installed: claude-account wizard" \
+    || echo "WARN: wizard dependencies failed to install; the CLI still works"
+else
+  echo "node 20+ not found (have: ${node_bin:-none}, major ${node_major}): skipping the wizard (brew install node, then rerun install.sh)"
+fi
+
 if [ -d "/Applications/Orca.app" ] || [ -d "$HOME/Applications/Orca.app" ]; then
   install -m 700 "$ROOT/lib/restart-orca.sh" "$LIB/restart-orca.sh"
   echo "Orca detected: restart helper installed."

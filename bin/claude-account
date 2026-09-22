@@ -20,6 +20,7 @@ PROFILES_DIR="$CONFIG_DIR/profiles"
 ACTIVE_FILE="$CONFIG_DIR/active"
 WRAPPER_BIN="$HOME/bin/claude"
 NATIVE_SERVICE="Claude Code-credentials"
+OAT_PREFIX="sk-ant-oat01"   # setup-token prefix, used by renew to pick the token out of output
 MEASURE_MODEL="claude-haiku-4-5-20251001"
 MEASURE_SYSTEM="You are Claude Code, Anthropic's official CLI for Claude."
 
@@ -346,6 +347,160 @@ cmd_add_oauth() {
   note "OAuth profile '$name' stored in the Keychain"
 }
 
+# Guided renewal of an expired or revoked setup-token. Runs `claude setup-token`
+# (browser login), picks the token out of its output, checks which account it
+# belongs to, asks once, stores it over the profile's Keychain item and measures
+# the profile right away. For a native_archive profile it renews the token that
+# profile measures through. Nothing is written until the user confirms.
+cmd_renew() {
+  name="${1:-}"
+  shift || true
+  yes=false; token_stdin=false; account_opt=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=true ;;
+      --token-stdin) token_stdin=true; yes=true ;;
+      --account) shift; account_opt="${1:-}" ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || usage_error "usage: claude-account renew <name> [--yes] [--token-stdin] [--account <email>]"
+  load_profile "$name"
+  [ -n "$NATIVE_BIN" ] || die "native claude binary not found (set CLAUDE_NATIVE_BIN)"
+  case "$PROFILE_TYPE" in
+    oauth_token) service="$KEYCHAIN_SERVICE"; what="sign-in oat" ;;
+    native_archive)
+      [ -n "$MEASURE_SERVICE" ] || die "profile '$name' is a native login; it has no setup-token to renew (use /login inside Claude Code)"
+      service="$MEASURE_SERVICE"; what="quota-measuring oat" ;;
+  esac
+  account="$account_opt"
+  [ -n "$account" ] || account="$(jq -r '.account // empty' "$PROFILE_FILE")"
+  [ -n "$account" ] || account="$(printf '%s' "$PROFILE_LABEL" | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' | head -1 || true)"
+
+  # Colours only on a terminal and never under NO_COLOR.
+  if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    B=$'\033[1m'; D=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'
+  else
+    B=""; D=""; G=""; Y=""; R=""; N=""
+  fi
+  ask() {  # <prompt> -> reply on stdout; empty reply on EOF
+    printf '%s' "$1" >&2
+    IFS= read -r reply || reply=""
+    printf '%s' "$reply"
+  }
+
+  if [ "$token_stdin" = true ]; then
+    IFS= read -r oat || :   # EOF without newline still assigns
+    oat="$(printf '%s' "$oat" | grep -oE "${OAT_PREFIX}-[A-Za-z0-9_-]+" | head -1 || true)"
+    [ -n "$oat" ] || die "no setup-token on stdin; nothing changed"
+    renew_store_token
+    return 0
+  fi
+  printf '\n%sRenew %s%s\n' "$B" "$what" "$N" >&2
+  printf '  profile  %s\n' "$name" >&2
+  printf '  account  %s\n\n' "${account:-${Y}not recorded yet (you will be asked after the login)$N}" >&2
+  printf '%s1/3  Browser login%s\n' "$B" "$N" >&2
+  printf '     Sign in with the %s%s%s account and approve. If a code is shown, paste it below.\n' "$B" "${account:-$name}" "$N" >&2
+  if [ "$yes" != true ]; then
+    printf '     %sEnter%s opens the browser, %sCtrl-C%s aborts. ' "$B" "$N" "$B" "$N" >&2
+    IFS= read -r _ || { printf '\n' >&2; die "no terminal input; aborted before opening the browser"; }
+  fi
+  capture="$(mktemp "${TMPDIR:-/tmp}/claude-account-renew.XXXXXX")"
+  chmod 600 "$capture"
+  trap 'rm -f "$capture"' EXIT INT TERM
+  # `script` lends the child a pseudo-terminal, so its TUI draws in place
+  # instead of repainting whole frames into a pipe. The stream is copied raw to
+  # $capture (where the oat is picked up) and the terminal only ever sees the
+  # oat masked. perl keeps the escape codes untouched.
+  printf '\n' >&2
+  if [ -t 2 ] && [ -e /dev/tty ]; then
+    script -q /dev/null "$NATIVE_BIN" setup-token 2>&1 </dev/tty \
+      | tee "$capture" \
+      | perl -pe "BEGIN{\$|=1} s/${OAT_PREFIX}-[A-Za-z0-9_-]+/${OAT_PREFIX}-(stored in the Keychain, hidden)/g" >&2 \
+      || true
+  else
+    "$NATIVE_BIN" setup-token > "$capture" 2>&1 || true
+  fi
+  oat="$(tr -d '\r' < "$capture" | grep -oE "${OAT_PREFIX}-[A-Za-z0-9_-]+" | tail -1 || true)"
+  rm -f "$capture"
+  trap - EXIT INT TERM
+  [ -n "$oat" ] || die "no setup-token came out of the browser login; nothing changed"
+
+  printf '\n%s2/3  Checking the oat%s\n' "$B" "$N" >&2
+  renew_store_token
+}
+
+# Validates $oat against the API, asks (unless --yes) and stores it under
+# $service for profile $name; prints the measurement line on stdout.
+renew_store_token() {
+  validate_token "$oat" || { unset oat; die "token rejected by Claude Code; nothing changed"; }
+  # A setup-token carries no e-mail (inference scope only), so the account is
+  # shown from the profile and the quota headers are the only live evidence.
+  line="$(measure_token_line "$name" "$oat")"
+  status="$(printf '%s' "$line" | cut -d, -f2)"
+  u5="$(printf '%s' "$line" | cut -d, -f4)"; u7="$(printf '%s' "$line" | cut -d, -f6)"; ov="$(printf '%s' "$line" | cut -d, -f8)"
+  case "$status" in
+    allowed|rejected)
+      printf '     %s✓ valid%s   5h window %s%% used, 7d window %s%%, overage %s\n' "$G" "$N" \
+        "$(awk -v v="${u5:-0}" 'BEGIN{printf "%d", v*100}')" "$(awk -v v="${u7:-0}" 'BEGIN{printf "%d", v*100}')" "${ov:-?}" >&2 ;;
+    *) unset oat; die "token accepted locally but the API refuses it ($line); nothing changed" ;;
+  esac
+  if [ -z "$account" ] && [ "$yes" != true ]; then
+    account="$(ask "     Which e-mail did you sign in with? (Enter to skip) ")"
+  fi
+  if [ "$yes" != true ]; then
+    printf '     %sStore it for %s?%s [y/N] ' "$B" "$name" "$N" >&2
+    IFS= read -r answer || answer=""
+    case "$answer" in y|Y|yes|YES|s|S|sim|SIM) ;; *) unset oat; die "aborted, nothing changed" ;; esac
+  fi
+
+  printf '%s3/3  Storing%s\n' "$B" "$N" >&2
+  security add-generic-password -U -a "$USER" -s "$service" -w "$oat" >/dev/null
+  unset oat
+  if [ -n "$account" ]; then
+    tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+    jq --arg a "$account" '.account = $a' "$PROFILE_FILE" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$PROFILE_FILE"
+  fi
+  if [ "$PROFILE_TYPE" = oauth_token ] && [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
+    oat="$(keychain_get "$service")"
+    project_token_into_native "$oat"
+    launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$oat"
+    unset oat
+    printf '     profile is active: native slot and launchctl updated, new sessions use the renewed oat\n' >&2
+  fi
+  printf '     %s✓ done%s   %s renewed%s\n\n' "$G" "$N" "$name" "${account:+ ($account)}" >&2
+  note "renewed: $line"
+}
+
+# One measurement line for an arbitrary oat (used by renew before storing).
+measure_token_line() {
+  name="$1"; oat="$2"
+  hdr="$(mktemp "${TMPDIR:-/tmp}/claude-account-measure.XXXXXX")"
+  http="$(curl -s -o /dev/null -D "$hdr" -w '%{http_code}' --max-time 20 \
+    https://api.anthropic.com/v1/messages \
+    -H "authorization: Bearer $oat" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: oauth-2025-04-20" \
+    -H "content-type: application/json" \
+    -d "$(jq -cn --arg m "$MEASURE_MODEL" --arg s "$MEASURE_SYSTEM" \
+      '{model:$m,max_tokens:1,system:[{type:"text",text:$s}],messages:[{role:"user",content:"."}]}')" \
+    2>/dev/null || printf '000')"
+  h() { grep -i "^anthropic-ratelimit-unified-$1:" "$hdr" | head -1 | cut -d: -f2- | tr -d ' \r' || true; }
+  s5="$(h 5h-status)"; u5="$(h 5h-utilization)"; r5="$(h 5h-reset)"
+  s7="$(h 7d-status)"; u7="$(h 7d-utilization)"; r7="$(h 7d-reset)"
+  so="$(h overage-status)"; ou="$(h overage-in-use)"
+  rm -f "$hdr"
+  status=unknown
+  if [ "$http" = 429 ]; then status=rejected
+  elif [ "$http" -ge 200 ] 2>/dev/null && [ "$http" -lt 300 ]; then
+    if [ "$s5" = rejected ] || [ "$s7" = rejected ]; then status=rejected
+    elif [ "$s5" = allowed ] && [ "$s7" = allowed ]; then status=allowed
+    fi
+  fi
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$name" "$status" "$http" "$u5" "$r5" "$u7" "$r7" "$so" "${ou:-false}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
 cmd_import_native() {
   name="${1:-primary}"
   shift || true
@@ -418,6 +573,22 @@ cmd_use() {
   else
     note "--no-restart: nothing was stopped; new sessions use '$name', open sessions and running agents keep their account until restarted"
   fi
+}
+
+# Interactive screen (Ink). Looks for the wizard next to this script (repo
+# checkout) or in the installed lib dir; the CLI stays the engine underneath.
+cmd_wizard() {
+  for dir in "$(dirname "$0")/../wizard" "$HOME/.local/lib/claude-account-manager/wizard" "${CLAUDE_ACCOUNT_WIZARD_DIR:-}"; do
+    [ -n "$dir" ] && [ -f "$dir/index.mjs" ] && [ -d "$dir/node_modules" ] && break
+    dir=""
+  done
+  [ -n "$dir" ] || die "wizard not installed; run install.sh (needs node >= 20)"
+  node_bin="$(command -v node || true)"
+  [ -n "$node_bin" ] || for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && node_bin="$c" && break; done
+  [ -n "$node_bin" ] || die "node not found (brew install node)"
+  major="$("$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  [ "$major" -ge 20 ] 2>/dev/null || die "the wizard needs node 20 or newer (found $("$node_bin" --version 2>/dev/null || echo '?') at $node_bin)"
+  CLAUDE_ACCOUNT_BIN="$0" CLAUDE_NATIVE_BIN="$NATIVE_BIN" CLAUDE_ACCOUNT_HOME="$CONFIG_DIR" exec "$node_bin" "$dir/index.mjs" "$@"
 }
 
 cmd_list() {
@@ -625,31 +796,8 @@ measure_one() {
     printf '%s,unmeasurable,,,,,,,,\n' "$name"
     return 0
   fi
-  hdr="$(mktemp "${TMPDIR:-/tmp}/claude-account-measure.XXXXXX")"
-  http="$(curl -s -o /dev/null -D "$hdr" -w '%{http_code}' --max-time 20 \
-    https://api.anthropic.com/v1/messages \
-    -H "authorization: Bearer $token" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: oauth-2025-04-20" \
-    -H "content-type: application/json" \
-    -d "$(jq -cn --arg m "$MEASURE_MODEL" --arg s "$MEASURE_SYSTEM" \
-      '{model:$m,max_tokens:1,system:[{type:"text",text:$s}],messages:[{role:"user",content:"."}]}')" \
-    2>/dev/null || printf '000')"
+  measure_token_line "$name" "$token"
   unset token
-  h() { grep -i "^anthropic-ratelimit-unified-$1:" "$hdr" | head -1 | cut -d: -f2- | tr -d ' \r' || true; }
-  s5="$(h 5h-status)"; u5="$(h 5h-utilization)"; r5="$(h 5h-reset)"
-  s7="$(h 7d-status)"; u7="$(h 7d-utilization)"; r7="$(h 7d-reset)"
-  so="$(h overage-status)"; ou="$(h overage-in-use)"
-  rm -f "$hdr"
-  status=unknown
-  if [ "$http" = 429 ]; then status=rejected
-  elif [ "$http" -ge 200 ] 2>/dev/null && [ "$http" -lt 300 ]; then
-    if [ "$s5" = rejected ] || [ "$s7" = rejected ]; then status=rejected
-    elif [ "$s5" = allowed ] && [ "$s7" = allowed ]; then status=allowed
-    fi
-  fi
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-    "$name" "$status" "$http" "${u5:-}" "${r5:-}" "${u7:-}" "${r7:-}" "${so:-}" "${ou:-false}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 cmd_measure() {
@@ -676,6 +824,8 @@ Usage:
   claude-account add-oauth <name> [--existing]      register a profile from a setup-token
                                                     (--existing: Keychain item already stored)
   claude-account add-oauth <name> --measure-for <p> use this token only to measure profile <p>
+  claude-account wizard                             interactive screen: switch, renew, doctor (arrow keys)
+  claude-account renew <name> [--yes]               guided renewal of an expired setup-token (browser)
   claude-account import-native [name] [--last-login] import the current /login (or the last one
                                                     displaced by `use`) as a profile
   claude-account use <name> [--no-restart|--keep-agents]  switch every auth layer, the native slot
@@ -701,6 +851,8 @@ case "$command_name" in
   add-oauth) cmd_add_oauth "$@" ;;
   import-native) cmd_import_native "$@" ;;
   use) cmd_use "$@" ;;
+  renew) cmd_renew "$@" ;;
+  wizard) cmd_wizard "$@" ;;
   list) cmd_list "$@" ;;
   status) cmd_status "$@" ;;
   doctor) cmd_doctor "$@" ;;
