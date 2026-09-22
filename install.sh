@@ -28,7 +28,7 @@ install -m 600 "$ROOT/lib/shell-init.zsh" "$LIB/shell-init.zsh"
 node_bin="$(command -v node || true)"
 [ -n "$node_bin" ] || for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && node_bin="$c" && break; done
 node_major="$([ -n "$node_bin" ] && "$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if [ -n "$node_bin" ] && [ "$node_major" -ge 20 ] 2>/dev/null; then
+if [ -n "$node_bin" ] && [ "$node_major" -ge 22 ] 2>/dev/null; then
   mkdir -p "$LIB/wizard"
   install -m 600 "$ROOT/wizard/package.json" "$LIB/wizard/package.json"
   install -m 600 "$ROOT/wizard/index.mjs" "$LIB/wizard/index.mjs"
@@ -37,7 +37,7 @@ if [ -n "$node_bin" ] && [ "$node_major" -ge 20 ] 2>/dev/null; then
     && echo "Wizard installed: claude-account wizard" \
     || echo "WARN: wizard dependencies failed to install; the CLI still works"
 else
-  echo "node 20+ not found (have: ${node_bin:-none}, major ${node_major}): skipping the wizard (brew install node, then rerun install.sh)"
+  echo "node 22+ not found (have: ${node_bin:-none}, major ${node_major}): skipping the wizard (brew install node, then rerun install.sh)"
 fi
 
 if [ -d "/Applications/Orca.app" ] || [ -d "$HOME/Applications/Orca.app" ]; then

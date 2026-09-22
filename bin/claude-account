@@ -582,12 +582,12 @@ cmd_wizard() {
     [ -n "$dir" ] && [ -f "$dir/index.mjs" ] && [ -d "$dir/node_modules" ] && break
     dir=""
   done
-  [ -n "$dir" ] || die "wizard not installed; run install.sh (needs node >= 20)"
+  [ -n "$dir" ] || die "wizard not installed; run install.sh (needs node >= 22)"
   node_bin="$(command -v node || true)"
   [ -n "$node_bin" ] || for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && node_bin="$c" && break; done
   [ -n "$node_bin" ] || die "node not found (brew install node)"
   major="$("$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  [ "$major" -ge 20 ] 2>/dev/null || die "the wizard needs node 20 or newer (found $("$node_bin" --version 2>/dev/null || echo '?') at $node_bin)"
+  [ "$major" -ge 22 ] 2>/dev/null || die "the wizard needs node 22 or newer (found $("$node_bin" --version 2>/dev/null || echo '?') at $node_bin)"
   CLAUDE_ACCOUNT_BIN="$0" CLAUDE_NATIVE_BIN="$NATIVE_BIN" CLAUDE_ACCOUNT_HOME="$CONFIG_DIR" exec "$node_bin" "$dir/index.mjs" "$@"
 }
 

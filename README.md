@@ -35,6 +35,7 @@ switch:      claude-account use <name> — atomic across every auth layer
 layers:      Keychain slots · native slot (agents) · launchctl · ~/.claude.json · daemon · shells
 safety:      every displaced credential archived first, fingerprint-verified
 diagnostics: doctor · status · probe (SHA-256 fingerprints, never secrets)
+wizard:      claude-account wizard: quotas, switch, renew and doctor with the arrow keys (Ink)
 extras:      optional Orca integration · CLAUDE_NATIVE_BIN override
 ```
 
@@ -110,6 +111,8 @@ claude-account use personal
 | | Command | What it does |
 |:---:|---|---|
 | ➕ | `add-oauth <name>` | register a profile from a setup-token (validated before storing) |
+| ♻️ | `renew <name>` | guided renewal of an expired setup-token: browser, check, store, measure |
+| 🧙 | `wizard` | interactive screen (arrow keys): accounts and quotas, switch, renew, doctor |
 | 📥 | `import-native [name] [--last-login]` | import the current `/login` (or the last one `use` displaced) as a profile |
 | 🔁 | `use <name>` | switch every auth layer to that profile, atomically, the native slot included |
 | 📋 | `list` | profiles, the active one marked with `*` |
@@ -119,6 +122,23 @@ claude-account use personal
 | 📈 | `measure [name...]` | 5h and 7d rate-limit state per profile, read from response headers |
 | 🚦 | `regime [--json]` | one word saying what the quota allows right now |
 | ▶️ | `exec [args...]` | run the native binary under the active profile (what the wrapper does) |
+
+## Wizard
+
+`claude-account wizard` is the same engine behind a screen: every profile with its 5h and 7d
+quota bars, then switch, renew or doctor with the arrow keys. Renewing a token walks the three
+steps (browser login, check, store) and never prints the token; the wizard reads the code prompt
+from `claude setup-token`, hands the code over and catches the token on the way to the Keychain.
+
+<div align="center">
+  <img src="docs/wizard-home.png" width="720" alt="claude-account wizard: accounts with quota bars and the menu" />
+  <br><br>
+  <img src="docs/wizard-renew.png" width="720" alt="claude-account wizard: token renewed in three steps" />
+</div>
+
+It needs `node` (22 or newer, what Ink 7 requires) and `python3` (ships with the Xcode command line tools; it lends `claude setup-token` a pseudo-terminal); `install.sh` installs it when node is present and skips it
+otherwise, the CLI works the same without it. `renew <name>` does the same flow in plain bash,
+and `renew <name> --token-stdin` stores a token piped in (what the wizard calls).
 
 ## Rate limits, automatic switching and the quota regime
 
