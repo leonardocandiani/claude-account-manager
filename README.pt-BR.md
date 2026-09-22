@@ -109,6 +109,8 @@ claude-account use pessoal
 | | Comando | O que faz |
 |:---:|---|---|
 | ➕ | `add-oauth <nome>` | registra um perfil por setup-token (validado antes de guardar) |
+| ♻️ | `renew <nome>` | renovação guiada de um setup-token vencido: browser, checagem, guarda, medição |
+| 🧙 | `wizard` | tela interativa (setas): contas e cotas, trocar, renovar, doctor |
 | 📥 | `import-native [nome] [--last-login]` | importa o `/login` atual (ou o último que o `use` deslocou) como perfil |
 | 🔁 | `use <nome>` | troca todas as camadas de auth pro perfil, atomicamente, slot nativo incluído |
 | 📋 | `list` | perfis, o ativo marcado com `*` |
@@ -152,6 +154,23 @@ O setup-token só tem escopo de inferência, então os conectores do claude.ai n
 O `claude-account login <nome>` faz uma vez um login completo do perfil, guardado num item próprio
 do Keychain; dali em diante o perfil roda nele (o setup-token fica só para o `measure`) e a troca
 de conta nunca mais abre o navegador.
+
+## Wizard
+
+`claude-account wizard` é o mesmo motor atrás de uma tela: cada perfil com as barras de cota de
+5h e 7d, e trocar, renovar ou rodar o doctor pelas setas. Renovar um token percorre os três
+passos (login no browser, checagem, guarda) e nunca imprime o token: o wizard lê o prompt de
+código do `claude setup-token`, entrega o código e captura o token no caminho pro Keychain.
+
+<div align="center">
+  <img src="docs/wizard-home.png" width="720" alt="claude-account wizard: contas com barras de cota e o menu" />
+  <br><br>
+  <img src="docs/wizard-renew.png" width="720" alt="claude-account wizard: token renovado em três passos" />
+</div>
+
+Precisa de `node` (22 ou mais novo, exigência do Ink 7) e de `python3` (vem com as ferramentas de linha de comando do Xcode; ele empresta um pseudo-terminal ao `claude setup-token`); o `install.sh` instala quando o node existe e pula quando
+não, a CLI funciona igual sem ele. `renew <nome>` faz o mesmo fluxo em bash puro, e
+`renew <nome> --token-stdin` guarda um token vindo do stdin (o que o wizard chama).
 
 ## Rate limit, troca automática e regime de cota
 
