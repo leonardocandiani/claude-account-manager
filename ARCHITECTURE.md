@@ -42,12 +42,16 @@ tool also measures the rate-limit state of each account and can switch on its ow
 2. An active OAuth profile implies that the native slot `Claude Code-credentials` carries that
    profile's token as a projected credential (no refresh token), with every other key of the blob
    kept. `doctor` fails on anything else in the slot (a stray `/login`, an empty slot, another
-   token), because that is the account background agents would run on.
-3. An active native profile implies absence of `CLAUDE_CODE_OAUTH_TOKEN` in `launchctl`.
-4. A default switch restarts the daemon and (when applicable) Orca. Running agents are kept on
-   their account with `--keep-agents`, and always when `use` runs inside an agent (a full stop
-   would end the caller). `--no-restart` stops nothing, and the headless switcher always passes
-   it; `regime` measures the account of the session that asks.
+   token), because that is the account background agents would run on. The exception is an OAuth
+   profile with a full login of its own (`secureStorageDir`, ADR-006): it never touches the slot,
+   and `launchctl` carries `CLAUDE_SECURESTORAGE_CONFIG_DIR` instead of the token.
+3. An active native profile implies absence of `CLAUDE_CODE_OAUTH_TOKEN` and of
+   `CLAUDE_SECURESTORAGE_CONFIG_DIR` in `launchctl`.
+4. A default switch moves background sessions to the new account (ADR-007) and restarts Orca
+   when applicable. `--keep-agents` leaves them on their account. `--no-restart` stops nothing;
+   the headless switcher passes `--no-restart --move-agents`, which moves them only once none is
+   busy, and only when the policy opts in with `"move_agents": true`. `regime` measures the
+   account of the session that asks.
 5. Every real login removed from the active slot has a recoverable archive in the Keychain,
    verified by fingerprint: the archive of the active native profile, or
    `Claude Code-credentials-last-login-archive` for a `/login` done inside Claude Code. The
@@ -120,3 +124,71 @@ regime projects where each window lands at reset from its average pace, with a f
 elapsed time so a young window does not explode the estimate; the recent pace is used only for
 the landing check in the last 30 minutes, because blending it into the projection made the
 reserve swing wildly within half an hour.
+
+## ADR-006: a full login per OAuth profile, in its own Keychain item
+
+**Status:** accepted (2026-10-07).
+
+A setup-token has inference scope only. Claude Code runs on it, but the claude.ai connectors
+(Drive, Gmail, Granola and the rest) never load under it: `claude mcp list` shows the local MCP
+servers and none of the `claude.ai ...` ones, while the native `/login` of another account on the
+same machine lists them all. The account has the connectors; the credential cannot reach them.
+
+Claude Code derives the name of its credential item from `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+(`Claude Code-credentials-<sha256(dir)[0:8]>`) without moving the configuration directory, so
+settings, hooks and MCP configuration stay shared. `login <name>` runs `claude auth login` once
+with that variable pointing to `~/.config/claude-account/logins/<name>`, checks the e-mail against
+the profile's `account`, and records `secureStorageDir` in the profile. From then on that profile
+exports the variable instead of the token, Claude Code keeps refreshing the login in its own
+item, and switching never asks for a browser again. The setup-token stays in the profile for
+`measure`.
+
+Claude Code forwards this variable to the daemon's background sessions (it shows up in the
+`providerEnv` of `~/.claude/jobs/<id>/state.json`) while it drops the OAuth token, which is why
+such a profile needs nothing projected into the native slot (ADR-005 still applies to plain
+setup-token profiles). Measured on 2.1.287: after `login`, `mcp list` under the profile shows the
+nine `claude.ai` connectors, a background session resumed under it answers a Granola call with
+that account's workspace, and the native slot's modification date does not move.
+
+Side effects: `claude auth login` rewrites `oauthAccount` in `~/.claude.json`, so the account
+shown by `auth status` follows the last login (display only). Going back to a native profile
+after a full-login one archives the live `/login` instead of restoring the older archive over it:
+the slot was never displaced, its refresh token kept rotating, and the archive is the stale copy.
+`use` and `doctor` validate the full login itself (signed in, recorded e-mail) before anything
+moves. Rejected: two `native_archive` profiles sharing the native slot, because a session of one
+account refreshing its token overwrites the other account's login.
+
+## ADR-007: background sessions are moved, not killed
+
+**Status:** accepted (2026-10-07; amends ADR-003 for background sessions).
+
+The daemon behind `claude agents` keeps the environment of whoever started it, so a switch
+reached background sessions only through a daemon stop, which ended them. `bg-restart` moves them
+instead:
+
+1. Snapshot the live background sessions (`claude agents --json`); a failure there is an error
+   that keeps the move pending, never "zero sessions".
+2. If one is `busy` or `shell` (alive with a background shell), defer: write
+   `bg-restart.pending`; with `"move_agents": true` in the policy the autoswitch cycle finishes
+   the move once all are idle. Nothing headless ever forces a busy session (ADR-003);
+   `bg-restart --force` is the manual way.
+3. A detached worker (double fork plus `setsid`, because the caller is often one of the sessions
+   about to stop) holds a lock, stops the daemon from the new profile's environment and resumes
+   each session with `claude --bg --resume <sessionId> "<wake prompt>"`. A prompt alone keeps the
+   session id; any extra flag (`-n`, `--model`) makes Claude Code open a copy under a new id.
+4. The daemon resumes a conversation into the job whose short id is the session id prefix; a
+   session that had lived under another job comes back with no saved flags, without its name and
+   in the default permission mode. The worker compares each session with the snapshot and, when
+   the name differs or bypass is missing while the global default is `bypassPermissions`, writes
+   `respawnFlags` in `state.json` and runs `claude respawn <id>`, which restarts that one session
+   with those flags and keeps its id.
+
+The wake prompt tells each session that its monitors and background shells died in the restart.
+A session whose identity had to be restored is respawned a few seconds after its resume, which
+cuts the wake turn short; the prompt stays in its transcript. The live slot's owner is recorded
+in `native-owner` (set when a native profile becomes active, cleared when a setup-token is
+projected), so the /login there is always archived into the profile it belongs to. `lib/
+restart-orca.sh` skips the daemon, background sessions and in-flight `--bg` clients.
+`claude-sessions` exposes the same mechanics one session at a time (create, resume, rename,
+colour, mode, stop), always on the active profile, so nothing needs to start the daemon with a
+bare `claude --bg` from an environment that may hold another account.

@@ -99,12 +99,12 @@ claude-account use personal
 ```
 
 > [!NOTE]
-> `use` restarts the Claude daemon and [Orca](https://orca.dev) (if installed) so live processes
-> switch too. `--keep-agents` keeps running background agents alive on their account (this is
-> automatic when `use` runs inside an agent, which a full stop would end); `--no-restart` stops
-> nothing. New shells and new agents always pick up the active profile; already-open sessions
-> keep the previous account until restarted. The headless switcher (`claude-account-autoswitch`)
-> always passes `--no-restart`.
+> `use` moves background sessions to the new account (same ids, deferred while one is busy) and
+> restarts [Orca](https://orca.dev) (if installed) so live terminals switch too. `--keep-agents`
+> leaves background sessions on their account; `--no-restart` stops nothing. New shells and new
+> agents always pick up the active profile; already-open sessions keep the previous account until
+> restarted. The headless switcher (`claude-account-autoswitch`) passes `--no-restart`, plus
+> `--move-agents` when the policy sets `"move_agents": true`.
 
 ## Commands
 
@@ -122,6 +122,39 @@ claude-account use personal
 | 📈 | `measure [name...]` | 5h and 7d rate-limit state per profile, read from response headers |
 | 🚦 | `regime [--json]` | one word saying what the quota allows right now |
 | ▶️ | `exec [args...]` | run the native binary under the active profile (what the wrapper does) |
+|  | `login <name>` | one-time full login for an OAuth profile, in its own Keychain item (claude.ai connectors) |
+|  | `bg-restart [--force]` | move background sessions to the active profile, same ids (deferred while one is busy) |
+|  | `bg-status` | active profile vs the daemon's, background sessions, pending move |
+
+## Background sessions
+
+The daemon behind `claude agents` keeps the environment of whoever started it, so `use` moves its
+sessions instead of stopping them: it snapshots them, restarts the daemon from the new profile's
+environment and resumes each one by id with a short prompt telling it that its monitors and
+background shells died in the restart. A busy session defers the move (the autoswitch cycle
+finishes it once they are all idle, with `"move_agents": true` in the policy). `claude-account bg-status` shows whether
+the daemon runs on the active profile.
+
+`claude-sessions` handles them one at a time, always on the active profile:
+
+```
+claude-sessions                                   # live sessions: id, name, status, color, mode
+claude-sessions new --name REPORTS --dir ~/work/app --color cyan --prompt "Build today's report"
+claude-sessions resume REPORTS                    # same id, never a copy
+claude-sessions rename REPORTS NIGHTLY            # also: color <target> <color>, mode <target> <mode>
+claude-sessions stop NIGHTLY                      # the conversation is kept
+claude-sessions account secondary                 # switch and move every session
+```
+
+Start background sessions through it (or `claude-account exec --bg`), never with a bare
+`claude --bg` from a process that may hold another account's environment.
+
+### Connectors on an OAuth profile
+
+A setup-token has inference scope only, so the claude.ai connectors never load under it.
+`claude-account login <name>` signs the profile in once with a full login kept in its own Keychain
+item; from then on that profile runs on it (the setup-token stays for `measure`) and switching
+never opens a browser again.
 
 ## Wizard
 
@@ -176,7 +209,7 @@ the API.
 ```
 
 Kill switch: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. A profile
-outside the policy that you activated by hand is never overridden. Try it with `--dry-run` first.
+outside the policy that you activated by hand is never overridden, and a manual switch between the two policy profiles is respected until the chosen one runs out while the other has room. Try it with `--dry-run` first.
 A LaunchAgent that runs it every 5 minutes:
 
 ```xml
@@ -235,7 +268,7 @@ If it happens anyway, `doctor` catches it, because background agents would run o
 The fix is one command, no reboot: `claude-account use <active-profile>`. The `/login` found in the
 slot is never deleted: it is kept as `Claude Code-credentials-last-login-archive`, and
 `claude-account import-native <name> --last-login` turns it into a profile. Offline scenario tests
-for switching: `tests/switch-scenarios.sh`.
+for switching: `tests/switch-scenarios.sh`; for full-login profiles, moving background sessions and `claude-sessions`: `tests/bg-sessions-scenarios.sh`.
 
 ## Requirements
 
