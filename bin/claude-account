@@ -486,7 +486,9 @@ renew_store_token() {
     tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
     jq --arg a "$account" '.account = $a' "$PROFILE_FILE" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$PROFILE_FILE"
   fi
-  if [ "$PROFILE_TYPE" = oauth_token ] && [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
+  # A full-login profile runs on its own login; its setup-token only measures, so the
+  # renewed one goes to the Keychain item and nowhere else.
+  if [ "$PROFILE_TYPE" = oauth_token ] && [ -z "$SECURE_DIR" ] && [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
     oat="$(keychain_get "$service")"
     project_token_into_native "$oat"
     launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$oat"
