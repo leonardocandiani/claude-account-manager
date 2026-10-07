@@ -199,6 +199,7 @@ function Home({ profiles, quotas, loading, onPick }) {
   const items = [
     { label: 'Switch account', value: 'switch' },
     { label: 'Renew a token', value: 'renew' },
+    { label: 'Full login (connectors)', value: 'login' },
     { label: 'Sync native archive', value: 'sync' },
     { label: 'Doctor', value: 'doctor' },
     { label: 'Quit', value: 'quit' },
@@ -338,15 +339,27 @@ function App() {
     if (v === 'quit') exit();
     else if (v === 'switch') setScreen('switch');
     else if (v === 'renew') setScreen('renew-pick');
+    else if (v === 'login') setScreen('login-pick');
     else if (v === 'sync') showResult('sync native archive', run(['sync-archive']));
     else if (v === 'doctor') showResult('doctor', run(['doctor']));
   } });
   if (screen === 'switch') return h(PickProfile, { title: 'switch to which account?', profiles, filter: (p) => !p.active, onBack: goHome, onPick: (n) => showResult(`switch to ${n}`, run(['use', n])) });
   if (screen === 'renew-pick') return h(PickProfile, { title: 'renew the token of which profile?', profiles, filter: (p) => p.measurable, onBack: goHome, onPick: (n) => { setPicked(profiles.find((p) => p.name === n)); setScreen('renew'); } });
   if (screen === 'renew') return h(Renew, { profile: picked, onBack: goHome });
+  // The browser login needs the real terminal, so the wizard steps aside and
+  // hands it to `claude-account login` once Ink has unmounted.
+  if (screen === 'login-pick') return h(PickProfile, { title: 'full login for which profile?', profiles, filter: (p) => p.type === 'oauth_token', onBack: goHome, onPick: (n) => { loginAfterExit = n; exit(); } });
   if (screen === 'busy') return h(Box, { flexDirection: 'column' }, h(Header, { subtitle: 'working' }), h(Text, { color: C.accent }, h(Spinner, { type: 'dots' }), ' talking to the Keychain...'));
   if (screen === 'result') return h(Result, { ...res, onBack: goHome });
   return null;
 }
 
-render(h(App));
+let loginAfterExit = null;
+render(h(App)).waitUntilExit().then(() => {
+  if (!loginAfterExit) return;
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  process.stdin.pause();
+  spawn(CLI, ['login', loginAfterExit], { stdio: 'inherit' })
+    .on('error', (err) => { console.error(`claude-account: could not start login: ${err.message}`); process.exit(1); })
+    .on('exit', (code) => process.exit(code ?? 1));
+});
