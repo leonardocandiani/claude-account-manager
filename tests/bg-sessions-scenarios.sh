@@ -50,7 +50,9 @@ cat > "$S/claude" <<'EOF'
 case "$1" in
   auth)
     if [ -n "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" ] && grep -qx "$CLAUDE_SECURESTORAGE_CONFIG_DIR" "$STUB_LOGGED" 2>/dev/null; then
-      echo '{"loggedIn":true,"email":"work@example.com"}'
+      if [ -n "${STUB_NOEMAIL:-}" ]; then echo '{"loggedIn":true,"email":null}'
+      elif [ -n "${STUB_OTHER:-}" ]; then echo '{"loggedIn":true,"email":"other@example.com"}'
+      else echo '{"loggedIn":true,"email":"work@example.com"}'; fi
     elif [ -n "$(printenv CLAUDE_CODE_""OAUTH_TOKEN)" ]; then echo '{"loggedIn":true}'
     else echo '{"loggedIn":false}'; fi ;;
   agents) [ -f "$STUB_AGENTS.fail" ] && exit 1; cat "$STUB_AGENTS" ;;
@@ -64,7 +66,7 @@ printf 'source claude-account\n' > "$W/home/.zprofile"
 echo '{"permissions":{"defaultMode":"bypassPermissions"}}' > "$W/home/.claude/settings.json"
 
 envs=(HOME="$W/home" CLAUDE_ACCOUNT_HOME="$W/cfg" CLAUDE_NATIVE_BIN="$S/claude" CLAUDE_ACCOUNT_BG_SETTLE=0 PATH="$S:$PATH")
-ca() { env "${envs[@]}" "$CA" "$@"; }
+ca() { env "${envs[@]}" STUB_NOEMAIL="${STUB_NOEMAIL:-}" STUB_OTHER="${STUB_OTHER:-}" "$CA" "$@"; }
 cs() { env "${envs[@]}" CLAUDE_ACCOUNT_BIN="$CA" "$CS" "$@"; }
 kc_get() { PATH="$S:$PATH" security find-generic-password -a x -s "$1" -w; }
 kc_put() { PATH="$S:$PATH" security add-generic-password -U -a x -s "$1" -w "$2"; }
@@ -108,6 +110,8 @@ check "use full-login: no OAuth token in launchctl" absent "$(lc "$TOKEN_VAR")"
 check "use full-login: native slot keeps the native login" A1 "$(live .claudeAiOauth.accessToken)"
 check "doctor: full login signed in" 1 "$(ca doctor 2>/dev/null | grep -c '\[ok\] full login of the active profile is signed in')"
 check "doctor: launchctl on the full login" 1 "$(ca doctor 2>/dev/null | grep -c '\[ok\] launchctl points to the full login')"
+check "doctor: full login without e-mail metadata still ok" 1 "$(STUB_NOEMAIL=1 ca doctor 2>/dev/null | grep -c '\[ok\] full login of the active profile is signed in')"
+check "doctor: a login of another account fails" 1 "$(STUB_OTHER=1 ca doctor 2>/dev/null | grep -c '\[FAIL\] full login')"
 check "exec exports the secure-storage dir" "$W/login-work" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv CLAUDE_SECURESTORAGE_CONFIG_DIR)"
 check "exec exports no OAuth token" "" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv "$TOKEN_VAR" || true)"
 

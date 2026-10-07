@@ -397,11 +397,14 @@ cmd_import_native() {
 # e-mail the profile recorded at login (a copied profile JSON, a deleted Keychain
 # item or a revoked refresh token all fail here instead of after the switch).
 validate_secure_login() {
-  local status expected
+  local status expected email
   status="$(env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR="$SECURE_DIR" "$NATIVE_BIN" auth status 2>/dev/null || true)"
   [ "$(jq -r '.loggedIn // false' <<<"$status" 2>/dev/null)" = true ] || return 1
+  # The e-mail comes from the shared oauthAccount metadata, which `use` strips and any
+  # login rewrites: compare it only when present.
   expected="$(jq -r '.account // empty' "$PROFILE_FILE")"
-  [ -z "$expected" ] || [ "$(jq -r '.email // empty' <<<"$status")" = "$expected" ]
+  email="$(jq -r '.email // empty' <<<"$status")"
+  [ -z "$expected" ] || [ -z "$email" ] || [ "$email" = "$expected" ]
 }
 
 # One-time browser login that gives an oauth_token profile the full scopes a
