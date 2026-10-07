@@ -645,7 +645,8 @@ measure_one() {
   if [ "$http" = 429 ]; then status=rejected
   elif [ "$http" -ge 200 ] 2>/dev/null && [ "$http" -lt 300 ]; then
     if [ "$s5" = rejected ] || [ "$s7" = rejected ]; then status=rejected
-    elif [ "$s5" = allowed ] && [ "$s7" = allowed ]; then status=allowed
+    # allowed_warning: the window crossed the warning threshold but still serves requests.
+    elif [ "${s5%_warning}" = allowed ] && [ "${s7%_warning}" = allowed ]; then status=allowed
     fi
   fi
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
