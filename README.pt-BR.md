@@ -97,12 +97,12 @@ claude-account use pessoal
 ```
 
 > [!NOTE]
-> O `use` reinicia o daemon do Claude e o [Orca](https://orca.dev) (se instalado) para que os
-> processos vivos também troquem. `--keep-agents` mantém vivos os agents de fundo em execução, na
-> conta em que nasceram (é automático quando o `use` roda de dentro de um agent, que uma parada
-> completa encerraria); `--no-restart` não para nada. Shells novos e agents novos sempre pegam o
-> perfil ativo; sessões já abertas seguem na conta anterior até reiniciar. O trocador automático
-> (`claude-account-autoswitch`) sempre passa `--no-restart`.
+> O `use` move as sessões em background para a conta nova (mesmos ids, adiando se alguma estiver
+> ocupada) e reinicia o [Orca](https://orca.dev) (se instalado) para os terminais abertos trocarem
+> também. `--keep-agents` deixa as sessões em background na conta delas; `--no-restart` não para
+> nada. Shells e agentes novos sempre pegam o perfil ativo; sessões já abertas ficam na conta
+> anterior até reiniciar. O trocador automático (`claude-account-autoswitch`) passa `--no-restart`,
+> mais `--move-agents` quando a política tem `"move_agents": true`.
 
 ## Comandos
 
@@ -118,6 +118,39 @@ claude-account use pessoal
 | 📈 | `measure [nome...]` | estado das janelas de 5h e 7d por perfil, lido dos headers de resposta |
 | 🚦 | `regime [--json]` | uma palavra dizendo o que a cota permite agora |
 | ▶️ | `exec [args...]` | roda o binário nativo sob o perfil ativo (o que o wrapper faz) |
+|  | `login <nome>` | login completo de um perfil OAuth, feito uma vez, num item próprio do Keychain (conectores do claude.ai) |
+|  | `bg-restart [--force]` | move as sessões em background para o perfil ativo, mesmos ids (adia se alguma estiver ocupada) |
+|  | `bg-status` | perfil ativo contra o do daemon, sessões em background, troca pendente |
+
+## Sessões em background
+
+O daemon do `claude agents` guarda o ambiente de quem o criou, então o `use` move as sessões dele
+em vez de pará-las: anota quais estão vivas, reinicia o daemon a partir do ambiente do perfil novo
+e retoma cada uma pelo mesmo id, com um prompt curto avisando que os monitores e shells em
+background morreram no reinício. Uma sessão ocupada adia a troca (o ciclo do autoswitch conclui
+quando todas estiverem ociosas, com `"move_agents": true` na política). O `claude-account bg-status` mostra se o
+daemon está no perfil ativo.
+
+O `claude-sessions` cuida delas uma a uma, sempre no perfil ativo:
+
+```
+claude-sessions                                   # sessões vivas: id, nome, status, cor, modo
+claude-sessions new --name RELATORIOS --dir ~/trabalho/app --color cyan --prompt "Monte o relatório de hoje"
+claude-sessions resume RELATORIOS                 # mesmo id, nunca uma cópia
+claude-sessions rename RELATORIOS NOTURNO         # também: color <alvo> <cor>, mode <alvo> <modo>
+claude-sessions stop NOTURNO                      # a conversa fica salva
+claude-sessions account secondary                 # troca de conta e leva todas as sessões
+```
+
+Crie sessões em background por ele (ou por `claude-account exec --bg`), nunca com `claude --bg`
+direto de um processo que pode carregar o ambiente de outra conta.
+
+### Conectores num perfil OAuth
+
+O setup-token só tem escopo de inferência, então os conectores do claude.ai nunca carregam com ele.
+O `claude-account login <nome>` faz uma vez um login completo do perfil, guardado num item próprio
+do Keychain; dali em diante o perfil roda nele (o setup-token fica só para o `measure`) e a troca
+de conta nunca mais abre o navegador.
 
 ## Rate limit, troca automática e regime de cota
 
@@ -155,7 +188,7 @@ a API.
 ```
 
 Botão de desligar: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. Perfil
-fora da política ativado à mão nunca é sobrescrito. Experimente com `--dry-run` antes. Um
+fora da política ativado à mão nunca é sobrescrito, e uma troca manual entre os dois perfis da política é respeitada até a conta escolhida esgotar enquanto a outra tem folga. Experimente com `--dry-run` antes. Um
 LaunchAgent que roda a cada 5 minutos:
 
 ```xml
@@ -214,7 +247,7 @@ Se acontecer mesmo assim, o `doctor` pega, porque os agents de fundo rodariam na
 A correção é um comando, sem reboot: `claude-account use <perfil-ativo>`. O `/login` achado no slot
 nunca é apagado: fica guardado como `Claude Code-credentials-last-login-archive`, e
 `claude-account import-native <nome> --last-login` o transforma em perfil. Testes de cenário
-offline da troca: `tests/switch-scenarios.sh`.
+offline da troca: `tests/switch-scenarios.sh`; dos perfis com login completo, das sessões em background e do `claude-sessions`: `tests/bg-sessions-scenarios.sh`.
 
 ## Requisitos
 

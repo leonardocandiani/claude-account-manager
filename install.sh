@@ -20,6 +20,7 @@ chmod 700 "$LIB" "$CONFIG" "$CONFIG/profiles"
 
 install -m 700 "$ROOT/bin/claude-account" "$BIN/claude-account"
 install -m 700 "$ROOT/bin/claude-account-autoswitch" "$BIN/claude-account-autoswitch"
+install -m 700 "$ROOT/bin/claude-sessions" "$BIN/claude-sessions"
 install -m 700 "$ROOT/bin/claude-account-regime" "$BIN/claude-account-regime"
 install -m 700 "$ROOT/bin/claude" "$BIN/claude"
 install -m 600 "$ROOT/lib/shell-init.zsh" "$LIB/shell-init.zsh"

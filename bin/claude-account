@@ -9,6 +9,17 @@
 # installed, Orca too; `--no-restart` stops nothing. The headless switcher
 # (claude-account-autoswitch) always passes `--no-restart`.
 #
+# A setup-token has inference scope only, so the claude.ai connectors (Drive,
+# Granola, ...) never load under it. `login <name>` gives an OAuth profile a full
+# login of its own, kept in a separate Keychain item that Claude Code derives from
+# CLAUDE_SECURESTORAGE_CONFIG_DIR. Claude Code forwards that variable to the
+# daemon's background sessions (it lands in their providerEnv) but not the OAuth
+# token, so such a profile needs nothing in the native slot.
+#
+# Background sessions are moved, not killed: `bg-restart` snapshots them, stops
+# the daemon from the new profile's environment and resumes each one by id
+# (deferred while any is busy). `claude-sessions` manages them one by one.
+#
 # `measure` reads the real rate-limit state of every profile from the
 # anthropic-ratelimit-unified-* headers (a setup-token has inference scope only,
 # so /api/oauth/usage is not available to it), which is what
@@ -22,6 +33,17 @@ WRAPPER_BIN="$HOME/bin/claude"
 NATIVE_SERVICE="Claude Code-credentials"
 MEASURE_MODEL="claude-haiku-4-5-20251001"
 MEASURE_SYSTEM="You are Claude Code, Anthropic's official CLI for Claude."
+BG_PENDING_FILE="$CONFIG_DIR/bg-restart.pending"
+BG_SNAPSHOT_FILE="$CONFIG_DIR/bg-restart.json"
+BG_LOG="$CONFIG_DIR/bg-restart.log"
+BG_LOCK_DIR="$CONFIG_DIR/bg-restart.lock"
+DAEMON_PROFILE_FILE="$CONFIG_DIR/daemon-profile"
+# Which native profile's /login sits in the live slot. A full-login profile leaves the
+# slot alone, so after one the owner is not the previous profile.
+NATIVE_OWNER_FILE="$CONFIG_DIR/native-owner"
+BG_LOCK_STALE_MIN=10
+# Pause between the worker's steps (stop, resume, identity check); tests set it to 0.
+BG_SETTLE_S="${CLAUDE_ACCOUNT_BG_SETTLE:-2}"
 
 die() { printf 'claude-account: ERROR: %s\n' "$*" >&2; exit 1; }
 usage_error() { printf 'claude-account: ERROR: %s\n' "$*" >&2; exit 2; }
@@ -86,6 +108,8 @@ load_profile() {
   PROFILE_LABEL="$(jq -r '.label // .name' "$PROFILE_FILE")"
   MEASURE_SERVICE="$(jq -r '.measureKeychainService // empty' "$PROFILE_FILE")"
   PROFILE_SUBSCRIPTION="$(jq -r '.subscription // "max"' "$PROFILE_FILE")"
+  # Set by `login`: the OAuth profile runs on a full login in its own Keychain item.
+  SECURE_DIR="$(jq -r '.secureStorageDir // empty' "$PROFILE_FILE")"
   case "$PROFILE_TYPE" in
     oauth_token|native_archive) ;;
     *) die "unknown profile type in $PROFILE_FILE: $PROFILE_TYPE" ;;
@@ -365,7 +389,226 @@ cmd_import_native() {
     email="$(CLAUDE_CODE_OAUTH_TOKEN='' "$NATIVE_BIN" auth status 2>/dev/null | jq -r '.email // empty' || true)"
   fi
   write_profile "$name" native_archive "$service" "$name (native login${email:+ $email})"
+  [ "$from" = "$NATIVE_SERVICE" ] && printf '%s\n' "$name" > "$NATIVE_OWNER_FILE"
   note "native credential imported as profile '$name'${email:+ ($email)}"
+}
+
+# The account a secureStorageDir profile really runs on: signed in, and the
+# e-mail the profile recorded at login (a copied profile JSON, a deleted Keychain
+# item or a revoked refresh token all fail here instead of after the switch).
+validate_secure_login() {
+  local status expected
+  status="$(env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR="$SECURE_DIR" "$NATIVE_BIN" auth status 2>/dev/null || true)"
+  [ "$(jq -r '.loggedIn // false' <<<"$status" 2>/dev/null)" = true ] || return 1
+  expected="$(jq -r '.account // empty' "$PROFILE_FILE")"
+  [ -z "$expected" ] || [ "$(jq -r '.email // empty' <<<"$status")" = "$expected" ]
+}
+
+# One-time browser login that gives an oauth_token profile the full scopes a
+# setup-token lacks (claude.ai connectors). It lands in its own Keychain item,
+# so the native slot and every other profile stay untouched, and Claude Code
+# keeps refreshing it from then on: switching never asks for a login again.
+cmd_login() {
+  local name="${1:-}" dir expected status email tmp
+  [ -n "$name" ] || usage_error "usage: claude-account login <name>"
+  shift
+  [ "$#" -eq 0 ] || usage_error "unknown option: $1"
+  load_profile "$name"
+  [ "$PROFILE_TYPE" = oauth_token ] || die "profile '$name' is a native login already; it loads the claude.ai connectors as is"
+  dir="$CONFIG_DIR/logins/$name"
+  mkdir -p "$dir"
+  chmod 700 "$CONFIG_DIR/logins" "$dir"
+  expected="$(jq -r '.account // empty' "$PROFILE_FILE")"
+  note "login: sign in as ${expected:-the '$name' account} in the browser; other profiles are not touched"
+  env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR="$dir" "$NATIVE_BIN" auth login ${expected:+--email "$expected"} \
+    || die "login did not finish"
+  status="$(env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR="$dir" "$NATIVE_BIN" auth status 2>/dev/null || true)"
+  [ "$(jq -r '.loggedIn // false' <<<"$status")" = true ] || die "login: not signed in after the browser step"
+  email="$(jq -r '.email // empty' <<<"$status")"
+  if [ -n "$expected" ] && [ "$email" != "$expected" ]; then
+    die "login: signed in as $email, but profile '$name' is $expected; run it again with the right account"
+  fi
+  tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+  jq --arg d "$dir" --arg a "$email" '.secureStorageDir = $d | if $a != "" then .account = $a else . end' \
+    "$PROFILE_FILE" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$PROFILE_FILE"
+  note "login: profile '$name' now uses the full login of ${email:-?} (claude.ai connectors); its setup-token stays for measure"
+  if [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
+    launchctl unsetenv CLAUDE_CODE_OAUTH_TOKEN >/dev/null 2>&1 || true
+    launchctl setenv CLAUDE_SECURESTORAGE_CONFIG_DIR "$dir"
+    cmd_bg_restart
+  else
+    note "help: claude-account use $name"
+  fi
+}
+
+# Background sessions live under one long-lived daemon that keeps the
+# environment of whoever spawned it, so a profile switch only reaches them when
+# the daemon is restarted from the new profile's environment. `--resume <id>`
+# plus a prompt continues the same session; any extra flag (-n, --model) makes
+# Claude Code start a copy under a new id (both tested 2026-10-07).
+# Callers run apply_profile_env first: `agents --json` spawns the daemon when
+# none is running, and it must be born with the right account.
+bg_sessions_json() {
+  local raw
+  raw="$("$NATIVE_BIN" agents --json 2>/dev/null)" || return 1
+  jq -ce 'if type == "array" then [.[] | select(.kind == "background") | {id, sessionId, cwd, name, status}] else error end' \
+    <<<"$raw" 2>/dev/null || return 1
+}
+
+# Held by the worker from snapshot to the last resume. A second restart while
+# one runs (autoswitch firing a pending one and then `use`, two quick `use`)
+# would snapshot half-resumed sessions and stop the daemon under them.
+bg_lock_busy() {
+  [ -d "$BG_LOCK_DIR" ] || return 1
+  if [ $(( $(date +%s) - $(stat -f %m "$BG_LOCK_DIR") )) -ge $((BG_LOCK_STALE_MIN * 60)) ]; then
+    rmdir "$BG_LOCK_DIR" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+cmd_bg_restart() {
+  local force=false if_pending=false sessions count busy
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) force=true ;;
+      --if-pending) if_pending=true ;;
+      -h|--help) printf 'usage: claude-account bg-restart [--force] [--if-pending]\n'; return 0 ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  if [ "$if_pending" = true ] && [ ! -f "$BG_PENDING_FILE" ]; then
+    note "bg-restart: nothing pending"
+    return 0
+  fi
+  apply_profile_env
+  if bg_lock_busy; then
+    [ -f "$BG_PENDING_FILE" ] || printf '%s\n' "$active" > "$BG_PENDING_FILE"
+    note "bg-restart: deferred, another restart is running (lock: $BG_LOCK_DIR)"
+    return 0
+  fi
+  if ! sessions="$(bg_sessions_json)"; then
+    [ -f "$BG_PENDING_FILE" ] || printf '%s\n' "$active" > "$BG_PENDING_FILE"
+    note "bg-restart: could not list background sessions (claude agents --json failed); kept pending"
+    return 1
+  fi
+  count="$(jq length <<<"$sessions")"
+  if [ "$count" -eq 0 ]; then
+    rm -f "$BG_PENDING_FILE"
+    "$NATIVE_BIN" daemon stop --any >/dev/null 2>&1 || true
+    printf '%s\n' "$active" > "$DAEMON_PROFILE_FILE"
+    note "bg-restart: 0 background sessions; daemon stopped, the next one starts under '$active'"
+    return 0
+  fi
+  # "shell" is idle with a background shell alive, which the restart would kill.
+  busy="$(jq -r '[.[] | select(.status == "busy" or .status == "shell") | .name // .id] | join(",")' <<<"$sessions")"
+  if [ -n "$busy" ] && [ "$force" != true ]; then
+    [ -f "$BG_PENDING_FILE" ] || printf '%s\n' "$active" > "$BG_PENDING_FILE"
+    note "bg-restart: deferred, busy: $busy"
+    note "help: the autoswitch finishes it once they are idle (policy move_agents); now: claude-account bg-restart --force"
+    return 0
+  fi
+  if ! mkdir "$BG_LOCK_DIR" 2>/dev/null; then
+    [ -f "$BG_PENDING_FILE" ] || printf '%s\n' "$active" > "$BG_PENDING_FILE"
+    note "bg-restart: deferred, another restart just started"
+    return 0
+  fi
+  printf '%s\n' "$sessions" > "$BG_SNAPSHOT_FILE"
+  rm -f "$BG_PENDING_FILE"
+  # Double fork + setsid: the caller is often one of the sessions the daemon
+  # stop is about to kill, and the worker must outlive it.
+  perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec @ARGV' \
+    "$0" _bg-restart-worker "$BG_SNAPSHOT_FILE" </dev/null >>"$BG_LOG" 2>&1
+  note "bg-restart: moving $count background session(s) to '$active' (log: $BG_LOG)"
+  note "help: claude-account bg-status"
+}
+
+cmd_bg_restart_worker() {
+  local snapshot="$1" n i sid cwd name wake
+  apply_profile_env
+  wake="claude-account: the background-session daemon was restarted to move to profile '$active'. Your monitors and background shells died in the restart; start again what was running and carry on where you left off. If nothing was running, just reply ok."
+  printf '%s start profile=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$active"
+  trap 'rmdir "$BG_LOCK_DIR" 2>/dev/null || true' EXIT
+  if ! jq -e 'type == "array" and length > 0' "$snapshot" >/dev/null 2>&1; then
+    printf 'abort: snapshot unreadable or empty, daemon left running\n'
+    return 1
+  fi
+  sleep "$BG_SETTLE_S"
+  "$NATIVE_BIN" daemon stop --any || true
+  sleep "$BG_SETTLE_S"
+  n="$(jq length "$snapshot")"
+  for ((i = 0; i < n; i++)); do
+    sid="$(jq -r ".[$i].sessionId" "$snapshot")"
+    cwd="$(jq -r ".[$i].cwd" "$snapshot")"
+    name="$(jq -r ".[$i].name // \"-\"" "$snapshot")"
+    if (cd "$cwd" && "$NATIVE_BIN" --bg --resume "$sid" "$wake" </dev/null >/dev/null); then
+      printf 'resumed %s %s\n' "$name" "$sid"
+    else
+      printf 'resume_failed %s %s cwd=%s\n' "$name" "$sid" "$cwd"
+    fi
+  done
+  printf '%s\n' "$active" > "$DAEMON_PROFILE_FILE"
+  sleep "$BG_SETTLE_S"
+  bg_restore_identity "$snapshot"
+  printf '%s end\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+# The daemon resumes a conversation into the job whose short id is the session
+# id prefix; when the session had lived under another job (a copy, a fork), the
+# new job starts with no saved flags, so it loses its name (Claude Code titles
+# it from the wake prompt) and its permission mode (falls back to the default).
+# The saved flags live in ~/.claude/jobs/<id>/state.json (respawnFlags), and
+# `claude respawn <id>` restarts one session with them, keeping its id.
+bg_restore_identity() {
+  local snapshot="$1" now n i sid name id state bypass flags_ok
+  bypass=false
+  [ "$(jq -r '.permissions.defaultMode // empty' "$HOME/.claude/settings.json" 2>/dev/null)" = bypassPermissions ] && bypass=true
+  now="$(bg_sessions_json)" || { printf 'identity_skip: could not list sessions\n'; return 0; }
+  n="$(jq length "$snapshot")"
+  for ((i = 0; i < n; i++)); do
+    sid="$(jq -r ".[$i].sessionId" "$snapshot")"
+    name="$(jq -r ".[$i].name // empty" "$snapshot")"
+    id="$(jq -r --arg s "$sid" '.[] | select(.sessionId == $s) | .id' <<<"$now" | head -1)"
+    state="$HOME/.claude/jobs/$id/state.json"
+    [ -n "$id" ] && [ -f "$state" ] || { printf 'identity_skip %s (job not found)\n' "$sid"; continue; }
+    flags_ok="$(jq -r --arg n "$name" --argjson b "$bypass" '
+      (($n == "" or .name == $n) and
+       (($b | not) or (.respawnFlags | index("--dangerously-skip-permissions") != null)))' "$state")"
+    [ "$flags_ok" = true ] && continue
+    jq --arg n "$name" --argjson b "$bypass" '
+      def drop(f): . as $a | [range(0; length)] | map(select(($a[.] | f) or (. > 0 and ($a[. - 1] | f) and ($a[.] | startswith("-") | not)) | not)) | map($a[.]);
+      .respawnFlags = ((.respawnFlags // [])
+        | if $n != "" then drop(. == "--name" or . == "-n") | ["--name", $n] + . else . end
+        | if $b then drop(. == "--permission-mode") | map(select(. != "--dangerously-skip-permissions")) + ["--dangerously-skip-permissions"] else . end)
+      | if $n != "" then .name = $n | .nameSource = "user" else . end' "$state" > "$state.tmp" \
+      && mv "$state.tmp" "$state"
+    if "$NATIVE_BIN" respawn "$id" >/dev/null 2>&1; then
+      printf 'identity_restored %s %s\n' "${name:--}" "$id"
+    else
+      printf 'identity_respawn_failed %s %s\n' "${name:--}" "$id"
+    fi
+  done
+}
+
+cmd_bg_status() {
+  local sessions daemon_profile missing
+  apply_profile_env
+  sessions="$(bg_sessions_json)" || { sessions='[]'; printf 'warning: claude agents --json failed, session list unavailable\n'; }
+  daemon_profile="$(cat "$DAEMON_PROFILE_FILE" 2>/dev/null || echo unknown)"
+  printf 'active: %s\ndaemon_profile: %s\npending: %s\n' "$active" "$daemon_profile" \
+    "$(cat "$BG_PENDING_FILE" 2>/dev/null || echo no)"
+  printf 'sessions[%s]{id,name,status}:\n' "$(jq length <<<"$sessions")"
+  jq -r '.[] | "  \(.id),\(.name // "-"),\(.status)"' <<<"$sessions"
+  if [ -f "$BG_SNAPSHOT_FILE" ]; then
+    missing="$(jq -r --argjson now "$sessions" \
+      '[.[] | .sessionId as $s | select([$now[].sessionId] | index($s) | not) | .name // .id] | join(",")' \
+      "$BG_SNAPSHOT_FILE")"
+    [ -n "$missing" ] && printf 'missing_since_last_restart: %s\n' "$missing"
+  fi
+  if [ "$daemon_profile" != "$active" ]; then
+    printf 'help: claude-account bg-restart\n'
+  fi
 }
 
 cmd_use() {
@@ -373,11 +616,13 @@ cmd_use() {
   shift || true
   restart=true
   keep_agents=false
+  move_agents=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --restart-orca) restart=true ;;
       --no-restart) restart=false ;;
       --keep-agents) keep_agents=true ;;
+      --move-agents) move_agents=true ;;
       *) usage_error "unknown option: $1" ;;
     esac
     shift
@@ -385,7 +630,10 @@ cmd_use() {
   load_profile "$name"
 
   # Validate before touching any layer.
-  case "$PROFILE_TYPE" in
+  case "$PROFILE_TYPE${SECURE_DIR:+:full}" in
+    oauth_token:full)
+      validate_secure_login || die "full login of profile '$name' is missing or signed out; run: claude-account login $name"
+      ;;
     oauth_token)
       token="$(keychain_get "$KEYCHAIN_SERVICE")" || die "token missing from Keychain: $KEYCHAIN_SERVICE"
       validate_token "$token" || { unset token; die "OAuth for profile '$name' was rejected"; }
@@ -396,25 +644,58 @@ cmd_use() {
       ;;
   esac
 
-  preserve_live_login
+  # The /login in the live slot belongs to the native profile recorded as its owner; a
+  # full-login profile in between never displaced it, and it kept rotating its refresh
+  # token. Archive it into that owner, never into whichever profile was active last.
+  owner="$(cat "$NATIVE_OWNER_FILE" 2>/dev/null || true)"
+  if [ -z "$owner" ]; then
+    # No record yet (installed while a native profile was active): that profile owns it.
+    current="$(active_name 2>/dev/null || true)"
+    if [ -n "$current" ] && [ -f "$(profile_file "$current")" ] && \
+       [ "$(jq -r '.type' "$(profile_file "$current")")" = native_archive ]; then
+      owner="$current"
+      printf '%s\n' "$owner" > "$NATIVE_OWNER_FILE"
+    fi
+  fi
+  if [ -n "$owner" ] && [ "$(live_native_kind)" = login ] && [ -f "$(profile_file "$owner")" ] && \
+     [ "$(jq -r '.type' "$(profile_file "$owner")")" = native_archive ]; then
+    archive_native_if_present "$(jq -r '.keychainService' "$(profile_file "$owner")")"
+  else
+    preserve_live_login
+  fi
   case "$PROFILE_TYPE" in
     oauth_token)
-      project_token_into_native "$token"
-      launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$token"
+      if [ -n "$SECURE_DIR" ]; then
+        launchctl unsetenv CLAUDE_CODE_OAUTH_TOKEN >/dev/null 2>&1 || true
+        launchctl setenv CLAUDE_SECURESTORAGE_CONFIG_DIR "$SECURE_DIR"
+      else
+        project_token_into_native "$token"
+        rm -f "$NATIVE_OWNER_FILE"
+        launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$token"
+        launchctl unsetenv CLAUDE_SECURESTORAGE_CONFIG_DIR >/dev/null 2>&1 || true
+        unset token
+      fi
       strip_stale_account_metadata
-      unset token
       ;;
     native_archive)
       launchctl unsetenv CLAUDE_CODE_OAUTH_TOKEN >/dev/null 2>&1 || true
+      launchctl unsetenv CLAUDE_SECURESTORAGE_CONFIG_DIR >/dev/null 2>&1 || true
       restore_native_active "$KEYCHAIN_SERVICE"
+      printf '%s\n' "$name" > "$NATIVE_OWNER_FILE"
       ;;
   esac
 
   set_active "$name"
-  note "active profile: $name ($PROFILE_TYPE)"
+  note "active profile: $name ($PROFILE_TYPE${SECURE_DIR:+, full login})"
   if [ "$restart" = true ]; then
-    restart_claude_daemon "$keep_agents"
+    if [ "$keep_agents" = true ]; then
+      restart_claude_daemon true
+    else
+      cmd_bg_restart || true
+    fi
     schedule_orca_restart
+  elif [ "$move_agents" = true ]; then
+    cmd_bg_restart || true
   else
     note "--no-restart: nothing was stopped; new sessions use '$name', open sessions and running agents keep their account until restarted"
   fi
@@ -516,7 +797,18 @@ cmd_doctor() {
     echo '[FAIL] profile credential missing from the Keychain'; failures=$((failures + 1))
   fi
   launch_value="$(launchctl getenv CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
-  if [ "$PROFILE_TYPE" = oauth_token ]; then
+  if [ -n "$SECURE_DIR" ]; then
+    if validate_secure_login; then
+      echo '[ok] full login of the active profile is signed in'
+    else
+      echo "[FAIL] full login of the active profile is missing or signed out (fix: claude-account login $active)"; failures=$((failures + 1))
+    fi
+    if [ "$(launchctl getenv CLAUDE_SECURESTORAGE_CONFIG_DIR 2>/dev/null || true)" = "$SECURE_DIR" ] && [ -z "$launch_value" ]; then
+      echo '[ok] launchctl points to the full login of the active profile'
+    else
+      echo "[FAIL] launchctl diverges from the active profile (fix: claude-account use $active)"; failures=$((failures + 1))
+    fi
+  elif [ "$PROFILE_TYPE" = oauth_token ]; then
     if [ -n "${secret:-}" ] && [ "$(fingerprint "$secret")" = "$(fingerprint "$launch_value")" ]; then
       echo '[ok] launchctl points to the active OAuth profile'
     else
@@ -535,8 +827,8 @@ cmd_doctor() {
       echo "[FAIL] $why, not on '$active' (fix: claude-account use $active)"; failures=$((failures + 1))
     fi
   else
-    if [ -n "$launch_value" ]; then
-      echo '[FAIL] launchctl still carries CLAUDE_CODE_OAUTH_TOKEN while a native profile is active'; failures=$((failures + 1))
+    if [ -n "$launch_value" ] || [ -n "$(launchctl getenv CLAUDE_SECURESTORAGE_CONFIG_DIR 2>/dev/null || true)" ]; then
+      echo '[FAIL] launchctl still carries another profile (CLAUDE_CODE_OAUTH_TOKEN or CLAUDE_SECURESTORAGE_CONFIG_DIR) while a native profile is active'; failures=$((failures + 1))
     else
       echo '[ok] launchctl carries no OAuth token'
     fi
@@ -575,6 +867,11 @@ apply_profile_env() {
   load_profile "$active"
   case "$PROFILE_TYPE" in
     oauth_token)
+      if [ -n "$SECURE_DIR" ]; then
+        unset CLAUDE_CODE_OAUTH_TOKEN
+        export CLAUDE_SECURESTORAGE_CONFIG_DIR="$SECURE_DIR"
+        return 0
+      fi
       token="$(keychain_get "$KEYCHAIN_SERVICE")" || die "OAuth token missing from Keychain"
       export CLAUDE_CODE_OAUTH_TOKEN="$token"
       unset token
@@ -583,6 +880,7 @@ apply_profile_env() {
       unset CLAUDE_CODE_OAUTH_TOKEN
       ;;
   esac
+  unset CLAUDE_SECURESTORAGE_CONFIG_DIR
 }
 
 # In economia the new session starts with --effort medium (the running session
@@ -678,9 +976,17 @@ Usage:
   claude-account add-oauth <name> --measure-for <p> use this token only to measure profile <p>
   claude-account import-native [name] [--last-login] import the current /login (or the last one
                                                     displaced by `use`) as a profile
-  claude-account use <name> [--no-restart|--keep-agents]  switch every auth layer, the native slot
-                                                    included; restarts the daemon (and Orca if
-                                                    installed). --keep-agents keeps running agents
+  claude-account use <name> [--no-restart|--keep-agents|--move-agents]
+                                                    switch every auth layer, the native slot
+                                                    included; moves background sessions to the new
+                                                    account (bg-restart) and restarts Orca if
+                                                    installed. --keep-agents leaves them on the old
+                                                    one; --no-restart --move-agents moves them only
+  claude-account login <name>                       one-time full login for an OAuth profile
+                                                    (claude.ai connectors; own Keychain item)
+  claude-account bg-restart [--force] [--if-pending] move background sessions to the active
+                                                    profile, same ids (deferred while one is busy)
+  claude-account bg-status                          active vs daemon profile, sessions, pending move
   claude-account list
   claude-account status
   claude-account doctor
@@ -707,6 +1013,10 @@ case "$command_name" in
   probe) cmd_probe "$@" ;;
   measure) cmd_measure "$@" ;;
   exec) cmd_exec "$@" ;;
+  login) cmd_login "$@" ;;
+  bg-restart) cmd_bg_restart "$@" ;;
+  bg-status) cmd_bg_status "$@" ;;
+  _bg-restart-worker) cmd_bg_restart_worker "$@" ;;
   regime) exec "$(dirname "$0")/claude-account-regime" "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; usage_error "unknown command: $command_name" ;;
