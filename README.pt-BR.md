@@ -97,8 +97,8 @@ claude-account use pessoal
 ```
 
 > [!NOTE]
-> O `use` move as sessões em background para a conta nova (mesmos ids, adiando se alguma estiver
-> ocupada) e reinicia o [Orca](https://orca.dev) (se instalado) para os terminais abertos trocarem
+> O `use` move as sessões em background para a conta nova (mesmos ids, inclusive as que estiverem
+> ocupadas) e reinicia o [Orca](https://orca.dev) (se instalado) para os terminais abertos trocarem
 > também. `--keep-agents` deixa as sessões em background na conta delas; `--no-restart` não para
 > nada. Shells e agentes novos sempre pegam o perfil ativo; sessões já abertas ficam na conta
 > anterior até reiniciar. O trocador automático (`claude-account-autoswitch`) passa `--no-restart`,
@@ -129,7 +129,8 @@ claude-account use pessoal
 O daemon do `claude agents` guarda o ambiente de quem o criou, então o `use` move as sessões dele
 em vez de pará-las: anota quais estão vivas, reinicia o daemon a partir do ambiente do perfil novo
 e retoma cada uma pelo mesmo id, com um prompt curto avisando que os monitores e shells em
-background morreram no reinício. Uma sessão ocupada adia a troca (o ciclo do autoswitch conclui
+background morreram no reinício. Na troca manual, uma sessão ocupada é interrompida e volta com
+esse prompt. Na troca automática, a sessão ocupada adia a troca (o ciclo do autoswitch conclui
 quando todas estiverem ociosas, com `"move_agents": true` na política). O `claude-account bg-status` mostra se o
 daemon está no perfil ativo.
 

@@ -171,7 +171,8 @@ instead:
 2. If one is `busy` or `shell` (alive with a background shell), defer: write
    `bg-restart.pending`; with `"move_agents": true` in the policy the autoswitch cycle finishes
    the move once all are idle. Nothing headless ever forces a busy session (ADR-003);
-   `bg-restart --force` is the manual way.
+   a manual `use` or `login` forces the move (a busy session is cut and resumed with the wake
+   prompt, by decision of the operator, 2026-10-09), as does `bg-restart --force`.
 3. A detached worker (double fork plus `setsid`, because the caller is often one of the sessions
    about to stop) holds a lock, stops the daemon from the new profile's environment and resumes
    each session with `claude --bg --resume <sessionId> "<wake prompt>"`. A prompt alone keeps the
