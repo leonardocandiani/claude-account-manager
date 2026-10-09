@@ -196,12 +196,15 @@ A job for launchd or cron, every 5 minutes. It measures the two profiles named i
 reaches the exhaustion thresholds, and returns when `preferred` has room again (hysteresis, a
 minimum interval between switches and a daily cap). It also writes `measure.json` with the last
 24 samples per profile, so a status line or any other reader consumes a file instead of calling
-the API.
+the API. `reserves` is optional: more accounts, in order, that the switcher uses when the
+preferred and the fallback are both exhausted, and leaves (back up the chain) as soon as an
+earlier account is under `return_below` again.
 
 ```json
 {
   "preferred": "work",
   "fallback": "personal",
+  "reserves": ["third"],
   "exhausted_at": {"five_hour": 0.95, "seven_day": 0.97},
   "return_below": {"five_hour": 0.70, "seven_day": 0.90},
   "min_switch_interval_min": 10,
@@ -210,7 +213,7 @@ the API.
 ```
 
 Kill switch: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. A profile
-outside the policy that you activated by hand is never overridden, and a manual switch between the two policy profiles is respected until the chosen one runs out while the other has room. Try it with `--dry-run` first.
+outside the policy that you activated by hand is never overridden, and a manual switch to any account of the chain is respected until the chosen one runs out while another has room. Try it with `--dry-run` first.
 A LaunchAgent that runs it every 5 minutes:
 
 ```xml
@@ -269,7 +272,7 @@ If it happens anyway, `doctor` catches it, because background agents would run o
 The fix is one command, no reboot: `claude-account use <active-profile>`. The `/login` found in the
 slot is never deleted: it is kept as `Claude Code-credentials-last-login-archive`, and
 `claude-account import-native <name> --last-login` turns it into a profile. Offline scenario tests
-for switching: `tests/switch-scenarios.sh`; for full-login profiles, moving background sessions and `claude-sessions`: `tests/bg-sessions-scenarios.sh`.
+for switching: `tests/switch-scenarios.sh`; for full-login profiles, moving background sessions and `claude-sessions`: `tests/bg-sessions-scenarios.sh`; for the switcher's decisions over the chain: `tests/autoswitch-scenarios.sh`.
 
 ## Requirements
 

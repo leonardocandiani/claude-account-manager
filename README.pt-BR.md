@@ -194,12 +194,15 @@ Um job pra launchd ou cron, a cada 5 minutos. Mede os dois perfis nomeados em
 bate os limiares de esgotamento, e volta quando o `preferred` tem folga de novo (histerese,
 intervalo mínimo entre trocas e teto diário). Também grava o `measure.json` com as últimas 24
 amostras por perfil, pra status line ou qualquer outro leitor consumir um arquivo em vez de chamar
-a API.
+a API. O `reserves` é opcional: mais contas, em ordem, que o autoswitch usa quando a preferida e
+a de fallback esgotam, e que ele deixa (subindo a cadeia) assim que uma conta anterior volta a
+ficar abaixo do `return_below`.
 
 ```json
 {
   "preferred": "trabalho",
   "fallback": "pessoal",
+  "reserves": ["terceira"],
   "exhausted_at": {"five_hour": 0.95, "seven_day": 0.97},
   "return_below": {"five_hour": 0.70, "seven_day": 0.90},
   "min_switch_interval_min": 10,
@@ -208,7 +211,7 @@ a API.
 ```
 
 Botão de desligar: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. Perfil
-fora da política ativado à mão nunca é sobrescrito, e uma troca manual entre os dois perfis da política é respeitada até a conta escolhida esgotar enquanto a outra tem folga. Experimente com `--dry-run` antes. Um
+fora da política ativado à mão nunca é sobrescrito, e uma troca manual para qualquer conta da cadeia é respeitada até a conta escolhida esgotar enquanto outra tem folga. Experimente com `--dry-run` antes. Um
 LaunchAgent que roda a cada 5 minutos:
 
 ```xml
@@ -267,7 +270,7 @@ Se acontecer mesmo assim, o `doctor` pega, porque os agents de fundo rodariam na
 A correção é um comando, sem reboot: `claude-account use <perfil-ativo>`. O `/login` achado no slot
 nunca é apagado: fica guardado como `Claude Code-credentials-last-login-archive`, e
 `claude-account import-native <nome> --last-login` o transforma em perfil. Testes de cenário
-offline da troca: `tests/switch-scenarios.sh`; dos perfis com login completo, das sessões em background e do `claude-sessions`: `tests/bg-sessions-scenarios.sh`.
+offline da troca: `tests/switch-scenarios.sh`; dos perfis com login completo, das sessões em background e do `claude-sessions`: `tests/bg-sessions-scenarios.sh`; das decisões do autoswitch sobre a cadeia: `tests/autoswitch-scenarios.sh`.
 
 ## Requisitos
 

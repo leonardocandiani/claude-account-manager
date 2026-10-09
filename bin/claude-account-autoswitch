@@ -8,6 +8,7 @@
 #   {
 #     "preferred": "work",
 #     "fallback": "personal",
+#     "reserves": ["third"],          (optional: more accounts, in order, after the fallback)
 #     "exhausted_at": {"five_hour": 0.95, "seven_day": 0.97},
 #     "return_below": {"five_hour": 0.70, "seven_day": 0.90},
 #     "min_switch_interval_min": 10,
@@ -53,6 +54,8 @@ fi
 
 pref="$(jq -r '.preferred' "$POLICY")"
 fall="$(jq -r '.fallback' "$POLICY")"
+chain=("$pref" "$fall")
+while IFS= read -r r; do [ -n "$r" ] && chain+=("$r"); done < <(jq -r '.reserves // [] | .[]' "$POLICY")
 t5="$(jq -r '.exhausted_at.five_hour // 0.95' "$POLICY")"
 t7="$(jq -r '.exhausted_at.seven_day // 0.97' "$POLICY")"
 b5="$(jq -r '.return_below.five_hour // 0.70' "$POLICY")"
@@ -61,9 +64,10 @@ min_int="$(jq -r '.min_switch_interval_min // 10' "$POLICY")"
 max_day="$(jq -r '.max_switches_per_day // 12' "$POLICY")"
 
 active="$(tr -d '[:space:]' < "$CONFIG_DIR/active" 2>/dev/null || true)"
-measured="$("$CLI" measure "$pref" "$fall" 2>/dev/null | tail -n +2 | sed 's/^  //')"
-line_pref="$(printf '%s\n' "$measured" | grep "^$pref," || true)"
-line_fall="$(printf '%s\n' "$measured" | grep "^$fall," || true)"
+measured="$("$CLI" measure "${chain[@]}" 2>/dev/null | tail -n +2 | sed 's/^  //')"
+line_of() { printf '%s\n' "$measured" | grep "^$1," || true; }
+line_pref="$(line_of "$pref")"
+line_fall="$(line_of "$fall")"
 
 field() { printf '%s' "$1" | cut -d, -f"$2"; }
 
@@ -93,44 +97,58 @@ room() {
 }
 
 decision="$active"; reason=stay
+in_chain() { local p; for p in "${chain[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
+# first_with_room <t5> <t7> [except]: the first account of the chain under the thresholds.
+first_with_room() {
+  local p
+  for p in "${chain[@]}"; do
+    [ "$p" = "${3:-}" ] && continue
+    room "$(line_of "$p")" "$1" "$2" && { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+[ -z "$active" ] && active_eff="$pref" || active_eff="$active"
 # A manual switch is respected: when the active profile is not the one the last
 # automatic switch chose, a person picked it, and the switcher leaves it alone
-# unless it runs out of quota while the other profile still has room.
+# unless it runs out of quota while another account of the chain still has room.
 last_to="$(jq -r '.to // empty' "$STATE" 2>/dev/null || true)"
-if [ -n "$active" ] && [ -n "$last_to" ] && [ "$active" != "$last_to" ] \
-   && { [ "$active" = "$pref" ] || [ "$active" = "$fall" ]; }; then
-  if [ "$active" = "$pref" ]; then line_active="$line_pref"; line_other="$line_fall"; other="$fall"
-  else line_active="$line_fall"; line_other="$line_pref"; other="$pref"; fi
-  if room "$line_active" "$t5" "$t7" || ! room "$line_other" "$t5" "$t7"; then
-    decision="$active"; reason=manual_choice_respected
-  else
-    decision="$other"; reason=manual_choice_exhausted
-  fi
-elif [ "$active" = "$pref" ] || [ -z "$active" ]; then
-  if room "$line_pref" "$t5" "$t7"; then
-    decision="$pref"; reason=preferred_has_room
-  elif room "$line_fall" "$t5" "$t7"; then
-    decision="$fall"; reason=preferred_exhausted_fallback_has_room
-  else
-    decision="$pref"; reason=both_exhausted_stay_preferred
-  fi
-elif [ "$active" = "$fall" ]; then
-  # Hysteresis: only go back when the preferred account has real room again.
-  if room "$line_pref" "$b5" "$b7"; then
-    decision="$pref"; reason=preferred_recovered
-  elif room "$line_fall" "$t5" "$t7"; then
-    decision="$fall"; reason=fallback_still_has_room
-  elif room "$line_pref" "$t5" "$t7"; then
-    decision="$pref"; reason=fallback_exhausted_preferred_has_room
-  else
-    decision="$fall"; reason=both_exhausted_stay
-  fi
-else
+if ! in_chain "$active_eff"; then
   # A profile outside the policy is active (manual choice); never override it.
   decision="$active"; reason=manual_profile_active
+elif [ -n "$active" ] && [ -n "$last_to" ] && [ "$active" != "$last_to" ]; then
+  if room "$(line_of "$active")" "$t5" "$t7" || ! next="$(first_with_room "$t5" "$t7" "$active")"; then
+    decision="$active"; reason=manual_choice_respected
+  else
+    decision="$next"; reason=manual_choice_exhausted
+  fi
+else
+  # Hysteresis: go back up the chain only to an account with real room again.
+  up=""
+  for p in "${chain[@]}"; do
+    [ "$p" = "$active_eff" ] && break
+    room "$(line_of "$p")" "$b5" "$b7" && { up="$p"; break; }
+  done
+  if [ -n "$up" ]; then
+    decision="$up"; [ "$up" = "$pref" ] && reason=preferred_recovered || reason=fallback_recovered
+  elif room "$(line_of "$active_eff")" "$t5" "$t7"; then
+    decision="$active_eff"
+    case "$active_eff" in "$pref") reason=preferred_has_room ;; "$fall") reason=fallback_still_has_room ;; *) reason=reserve_still_has_room ;; esac
+  elif next="$(first_with_room "$t5" "$t7" "$active_eff")"; then
+    decision="$next"
+    if [ "$active_eff" = "$pref" ] && [ "$next" = "$fall" ]; then reason=preferred_exhausted_fallback_has_room
+    elif [ "$active_eff" = "$fall" ] && [ "$next" = "$pref" ]; then reason=fallback_exhausted_preferred_has_room
+    else reason=exhausted_next_has_room; fi
+  else
+    decision="$active_eff"
+    [ "$active_eff" = "$pref" ] && reason=both_exhausted_stay_preferred || reason=both_exhausted_stay
+  fi
 fi
 
 summary="active=$active decision=$decision reason=$reason pref=[$(field "$line_pref" 2)/5h=$(field "$line_pref" 4)/7d=$(field "$line_pref" 6)] fall=[$(field "$line_fall" 2)/5h=$(field "$line_fall" 4)/7d=$(field "$line_fall" 6)]"
+for r in "${chain[@]:2}"; do
+  l="$(line_of "$r")"
+  summary="$summary $r=[$(field "$l" 2)/5h=$(field "$l" 4)/7d=$(field "$l" 6)]"
+done
 
 if [ "$decision" = "$active" ]; then
   log "$summary"
