@@ -98,7 +98,7 @@ claude-account use personal
 ```
 
 > [!NOTE]
-> `use` moves background sessions to the new account (same ids, deferred while one is busy) and
+> `use` moves background sessions to the new account (same ids, busy ones included) and
 > restarts [Orca](https://orca.dev) (if installed) so live terminals switch too. `--keep-agents`
 > leaves background sessions on their account; `--no-restart` stops nothing. New shells and new
 > agents always pick up the active profile; already-open sessions keep the previous account until
@@ -128,8 +128,9 @@ claude-account use personal
 The daemon behind `claude agents` keeps the environment of whoever started it, so `use` moves its
 sessions instead of stopping them: it snapshots them, restarts the daemon from the new profile's
 environment and resumes each one by id with a short prompt telling it that its monitors and
-background shells died in the restart. A busy session defers the move (the autoswitch cycle
-finishes it once they are all idle, with `"move_agents": true` in the policy). `claude-account bg-status` shows whether
+background shells died in the restart. On a manual switch a busy session is cut and comes back
+with that prompt; on an automatic one it defers the move (the autoswitch cycle finishes it once
+they are all idle, with `"move_agents": true` in the policy). `claude-account bg-status` shows whether
 the daemon runs on the active profile.
 
 `claude-sessions` handles them one at a time, always on the active profile:

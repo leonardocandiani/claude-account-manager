@@ -164,6 +164,19 @@ ca bg-restart --if-pending >/dev/null; wait_worker
 check "pending, all idle: moved" 1 "$(grep -c '^daemon stop --any$' "$STUB_LOG")"
 check "the move clears the pending marker" absent "$([ -f "$W/cfg/bg-restart.pending" ] && echo present || echo absent)"
 
+# A manual switch moves everything at once, busy sessions included; only the headless
+# switcher (--no-restart --move-agents) waits for them.
+jq '(.[0].status) = "busy"' "$STUB_AGENTS" > "$STUB_AGENTS.tmp" && mv "$STUB_AGENTS.tmp" "$STUB_AGENTS"
+: > "$STUB_LOG"
+ca use personal --no-restart --move-agents >/dev/null
+check "autoswitch path, busy: deferred" personal "$(cat "$W/cfg/bg-restart.pending")"
+check "autoswitch path, busy: nothing stopped" 0 "$(grep -c '^daemon stop --any$' "$STUB_LOG")"
+rm -f "$W/cfg/bg-restart.log"; ca use work >/dev/null; wait_worker
+check "manual use, busy: daemon stopped" 1 "$(grep -c '^daemon stop --any$' "$STUB_LOG")"
+check "manual use, busy: busy session resumed too" 1 "$(grep -c '^bg .*--resume aaaa1111-' "$STUB_LOG")"
+check "manual use: nothing left pending" absent "$([ -f "$W/cfg/bg-restart.pending" ] && echo present || echo absent)"
+jq '(.[0].status) = "idle"' "$STUB_AGENTS" > "$STUB_AGENTS.tmp" && mv "$STUB_AGENTS.tmp" "$STUB_AGENTS"
+
 # Another move in progress (lock held): deferred and pending, nothing stopped.
 mkdir "$W/cfg/bg-restart.lock"; : > "$STUB_LOG"
 check "lock held: deferred" 1 "$(ca bg-restart --force | grep -c 'another restart is running')"

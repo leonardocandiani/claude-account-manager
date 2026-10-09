@@ -438,7 +438,7 @@ cmd_login() {
   if [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
     launchctl unsetenv CLAUDE_CODE_OAUTH_TOKEN >/dev/null 2>&1 || true
     launchctl setenv CLAUDE_SECURESTORAGE_CONFIG_DIR "$dir"
-    cmd_bg_restart
+    cmd_bg_restart --force
   else
     note "help: claude-account use $name"
   fi
@@ -694,7 +694,9 @@ cmd_use() {
     if [ "$keep_agents" = true ]; then
       restart_claude_daemon true
     else
-      cmd_bg_restart || true
+      # A manual switch moves everything now: a busy session is cut and comes back
+      # with the wake prompt. Only the headless switcher (--move-agents) waits.
+      cmd_bg_restart --force || true
     fi
     schedule_orca_restart
   elif [ "$move_agents" = true ]; then
