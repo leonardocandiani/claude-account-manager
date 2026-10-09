@@ -52,9 +52,10 @@ if [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-r
   log "bg_restart_pending $("$CLI" bg-restart --if-pending 2>&1 | tr '\n' ' ' | cut -c1-200)"
 fi
 
-pref="$(jq -r '.preferred' "$POLICY")"
-fall="$(jq -r '.fallback' "$POLICY")"
-chain=("$pref" "$fall")
+pref="$(jq -r '.preferred // empty' "$POLICY")"
+fall="$(jq -r '.fallback // empty' "$POLICY")"
+chain=("$pref")
+[ -n "$fall" ] && chain+=("$fall")
 while IFS= read -r r; do [ -n "$r" ] && chain+=("$r"); done < <(jq -r '.reserves // [] | .[]' "$POLICY")
 t5="$(jq -r '.exhausted_at.five_hour // 0.95' "$POLICY")"
 t7="$(jq -r '.exhausted_at.seven_day // 0.97' "$POLICY")"

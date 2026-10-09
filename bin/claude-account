@@ -27,6 +27,7 @@
 set -euo pipefail
 
 CONFIG_DIR="${CLAUDE_ACCOUNT_HOME:-$HOME/.config/claude-account}"
+POLICY_FILE="$CONFIG_DIR/policy.json"
 PROFILES_DIR="$CONFIG_DIR/profiles"
 ACTIVE_FILE="$CONFIG_DIR/active"
 WRAPPER_BIN="$HOME/bin/claude"
@@ -330,11 +331,17 @@ cmd_add_oauth() {
   name="${1:-}"
   shift || true
   existing=false
+  token_stdin=false
   measure_for=""
+  account_opt=""
+  reserve=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --existing) existing=true ;;
+      --token-stdin) token_stdin=true ;;
       --measure-for) shift; measure_for="${1:-}" ;;
+      --account) shift; account_opt="${1:-}" ;;
+      --reserve) reserve=true ;;
       *) usage_error "unknown option: $1" ;;
     esac
     shift
@@ -343,16 +350,25 @@ cmd_add_oauth() {
   service="Claude Code OAuth Token - $name"
   if [ "$existing" = true ]; then
     token="$(keychain_get "$service")" || die "no Keychain item named '$service'"
+  elif [ "$token_stdin" = true ]; then
+    IFS= read -r token || :
+    token="$(printf '%s' "$token" | grep -oE "${OAT_PREFIX}-[A-Za-z0-9_-]+" | head -1 || true)"
   else
     printf 'Paste the setup-token for profile %s (hidden input): ' "$name" >&2
     IFS= read -r -s token
     printf '\n' >&2
   fi
   case "$token" in
-    sk-ant-oat01-*) ;;
+    "${OAT_PREFIX}"-*) ;;
     *) unset token; die "unexpected setup-token format" ;;
   esac
   validate_token "$token" || { unset token; die "token rejected by Claude Code"; }
+  line="$(measure_token_line "$name" "$token")"
+  case "$(printf '%s' "$line" | cut -d, -f2),$(printf '%s' "$line" | cut -d, -f3)" in
+    allowed,*|rejected,*|*,2??) ;;
+    *,000) unset token; die "could not reach the API to check the token (network?); nothing changed" ;;
+    *) unset token; die "token accepted locally but the API refuses it ($line); nothing changed" ;;
+  esac
   [ "$existing" = true ] || security add-generic-password -U -a "$USER" -s "$service" -w "$token" >/dev/null
   unset token
   if [ -n "$measure_for" ]; then
@@ -367,8 +383,77 @@ cmd_add_oauth() {
     note "profile '$measure_for' now measures through the Keychain item '$service'"
     return 0
   fi
-  write_profile "$name" oauth_token "$service" "$name (OAuth setup-token)"
-  note "OAuth profile '$name' stored in the Keychain"
+  file="$(profile_file "$name")"
+  if [ -f "$file" ] && [ "$(jq -r .type "$file")" = oauth_token ]; then
+    # Re-adding refreshes the token only: the account and a full login stay.
+    note "OAuth profile '$name' already existed; its token was replaced, the rest kept"
+  else
+    write_profile "$name" oauth_token "$service" "$name (OAuth setup-token)"
+    note "OAuth profile '$name' stored in the Keychain"
+  fi
+  if [ -n "$account_opt" ]; then
+    tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+    jq --arg a "$account_opt" '.account = $a' "$file" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$file"
+  fi
+  [ "$reserve" = true ] && rotation_append "$name"
+  note "added: $line"
+}
+
+# The autoswitch chain: preferred, fallback, then the reserves, in order.
+rotation_chain() {
+  [ -f "$POLICY_FILE" ] || return 0
+  jq -r '[.preferred, .fallback] + (.reserves // []) | map(select(. != null and . != "")) | .[]' "$POLICY_FILE"
+}
+
+rotation_write() { # name...
+  local tmp
+  tmp="$(mktemp "$CONFIG_DIR/.policy.XXXXXX")"
+  if [ -f "$POLICY_FILE" ]; then cat "$POLICY_FILE"; else printf '{"move_agents":true}'; fi |
+    jq --args '.preferred = $ARGS.positional[0] | .reserves = $ARGS.positional[2:]
+      | if ($ARGS.positional | length) > 1 then .fallback = $ARGS.positional[1] else del(.fallback) end' "$@" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$POLICY_FILE"
+}
+
+rotation_append() {
+  local chain=() p
+  while IFS= read -r p; do chain+=("$p"); done < <(rotation_chain)
+  # ${a[@]+...}: bash 3.2 under set -u aborts on an empty array otherwise.
+  for p in ${chain[@]+"${chain[@]}"}; do [ "$p" = "$1" ] && { note "rotation: '$1' is already in the chain"; return 0; }; done
+  rotation_write ${chain[@]+"${chain[@]}"} "$1"
+  note "rotation: '$1' added as account $(( ${#chain[@]} + 1 )) of the chain"
+}
+
+cmd_rotation() {
+  local sub="${1:-}" chain=() p i
+  shift || true
+  case "$sub" in
+    on) rm -f "$CONFIG_DIR/autoswitch.off"; note "autoswitch: on" ;;
+    off) touch "$CONFIG_DIR/autoswitch.off"; note "autoswitch: off (kill switch $CONFIG_DIR/autoswitch.off)" ;;
+    set)
+      [ "$#" -ge 2 ] || usage_error "a rotation needs at least two accounts: claude-account rotation set <first> <second> [more...]"
+      for p in "$@"; do
+        validate_name "$p"
+        [ -f "$(profile_file "$p")" ] || die "profile does not exist: $p"
+      done
+      [ "$(printf '%s\n' "$@" | sort | uniq -d)" = "" ] || usage_error "an account appears twice in the order"
+      rotation_write "$@"
+      note "rotation: $(printf '%s ' "$@" | sed 's/ $//; s/ / -> /g')" ;;
+    ""|show) ;;
+    -h|--help) printf 'usage: claude-account rotation [show|set <first> [second] [more...]|on|off]\n'; return 0 ;;
+    *) usage_error "unknown rotation command: $sub (show, set, on, off)" ;;
+  esac
+  while IFS= read -r p; do chain+=("$p"); done < <(rotation_chain)
+  printf 'autoswitch: %s\n' "$([ -e "$CONFIG_DIR/autoswitch.off" ] && echo off || echo on)"
+  printf 'active: %s\n' "$(active_name 2>/dev/null || echo none)"
+  if [ "${#chain[@]}" -eq 0 ]; then
+    printf 'chain: 0 accounts (no policy yet)\n'
+    printf 'help: claude-account rotation set <first> <second> [more...]\n'
+    return 0
+  fi
+  printf 'chain[%d]{rank,name}:\n' "${#chain[@]}"
+  i=1; for p in "${chain[@]}"; do printf '  %d,%s\n' "$i" "$p"; i=$((i + 1)); done
+  printf 'help: claude-account rotation set <first> <second> [more...] | rotation on|off\n'
 }
 
 # Guided renewal of an expired or revoked setup-token. Runs `claude setup-token`
@@ -1127,10 +1212,12 @@ cmd_measure() {
 usage() {
   cat <<'EOF'
 Usage:
-  claude-account add-oauth <name> [--existing]      register a profile from a setup-token
-                                                    (--existing: Keychain item already stored)
+  claude-account add-oauth <name> [--existing|--token-stdin] [--account <email>] [--reserve]
+                                                    register a profile from a setup-token
+                                                    (--existing: Keychain item already stored;
+                                                    --reserve: also add it to the autoswitch chain)
   claude-account add-oauth <name> --measure-for <p> use this token only to measure profile <p>
-  claude-account wizard                             interactive screen: switch, renew, doctor (arrow keys)
+  claude-account wizard                             interactive screen: switch, add, rotation, renew, doctor
   claude-account renew <name> [--yes]               guided renewal of an expired setup-token (browser)
   claude-account import-native [name] [--last-login] import the current /login (or the last one
                                                     displaced by `use`) as a profile
@@ -1145,6 +1232,8 @@ Usage:
   claude-account bg-restart [--force] [--if-pending] move background sessions to the active
                                                     profile, same ids (deferred while one is busy)
   claude-account bg-status                          active vs daemon profile, sessions, pending move
+  claude-account rotation [set <a> [b] [more...]|on|off]
+                                                    the autoswitch chain (order) and its on/off switch
   claude-account list
   claude-account status
   claude-account doctor
@@ -1163,6 +1252,7 @@ command_name="${1:-help}"
 shift || true
 case "$command_name" in
   add-oauth) cmd_add_oauth "$@" ;;
+  rotation) cmd_rotation "$@" ;;
   import-native) cmd_import_native "$@" ;;
   use) cmd_use "$@" ;;
   renew) cmd_renew "$@" ;;

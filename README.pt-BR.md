@@ -108,9 +108,10 @@ claude-account use pessoal
 
 | | Comando | O que faz |
 |:---:|---|---|
-| ➕ | `add-oauth <nome>` | registra um perfil por setup-token (validado antes de guardar) |
+| ➕ | `add-oauth <nome> [--token-stdin] [--account <email>] [--reserve]` | registra um perfil por setup-token (validado na API antes de guardar); `--reserve` já o põe no fim da cadeia do autoswitch |
+|  | `rotation [set <a> [b] [mais...]\|on\|off]` | mostra ou define a ordem que o autoswitch percorre, e liga ou desliga |
 | ♻️ | `renew <nome>` | renovação guiada de um setup-token vencido: browser, checagem, guarda, medição |
-| 🧙 | `wizard` | tela interativa (setas): contas e cotas, trocar, renovar, doctor |
+| 🧙 | `wizard` | tela interativa (setas): contas e cotas, trocar, adicionar conta, rodízio, renovar, doctor |
 | 📥 | `import-native [nome] [--last-login]` | importa o `/login` atual (ou o último que o `use` deslocou) como perfil |
 | 🔁 | `use <nome>` | troca todas as camadas de auth pro perfil, atomicamente, slot nativo incluído |
 | 📋 | `list` | perfis, o ativo marcado com `*` |
@@ -157,8 +158,17 @@ de conta nunca mais abre o navegador.
 
 ## Wizard
 
-`claude-account wizard` é o mesmo motor atrás de uma tela: cada perfil com as barras de cota de
-5h e 7d, e trocar, renovar ou rodar o doctor pelas setas. Renovar um token percorre os três
+`claude-account wizard` é o mesmo motor atrás de uma tela. No topo: se o autoswitch está ligado,
+a ordem que ele percorre (① ② ③), o que ele decidiu por último e em que conta estão as sessões em
+background; embaixo, cada perfil com a posição e as barras de cota de 5h e 7d. Dali você troca de
+conta (todas as sessões vão junto), adiciona conta, muda o rodízio ou desliga o autoswitch,
+renova, faz o login completo ou roda o doctor. Quando as sessões em background ainda não estão na
+conta ativa, o menu oferece movê-las na hora.
+
+Adicionar conta é um fluxo só: um nome, o login no navegador, o e-mail (opcional), se ela entra no
+rodízio, e então ela é conferida na API, guardada no Keychain e medida. O token nunca aparece. No
+fim dá para trocar para ela na hora ou fazer também o login completo, para os conectores do
+claude.ai. Renovar um token percorre os três
 passos (login no browser, checagem, guarda) e nunca imprime o token: o wizard lê o prompt de
 código do `claude setup-token`, entrega o código e captura o token no caminho pro Keychain.
 
@@ -170,7 +180,9 @@ código do `claude setup-token`, entrega o código e captura o token no caminho 
 
 Precisa de `node` (22 ou mais novo, exigência do Ink 7) e de `python3` (vem com as ferramentas de linha de comando do Xcode; ele empresta um pseudo-terminal ao `claude setup-token`); o `install.sh` instala quando o node existe e pula quando
 não, a CLI funciona igual sem ele. `renew <nome>` faz o mesmo fluxo em bash puro, e
-`renew <nome> --token-stdin` guarda um token vindo do stdin (o que o wizard chama).
+`renew <nome> --token-stdin` guarda um token vindo do stdin (o que o wizard chama); adicionar
+conta chama `add-oauth <nome> --token-stdin`. Testes: `python3 tests/wizard-scenarios.py` dirige a
+tela num pseudo-terminal com todo comando externo simulado.
 
 ## Rate limit, troca automática e regime de cota
 

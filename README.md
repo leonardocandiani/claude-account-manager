@@ -35,7 +35,7 @@ switch:      claude-account use <name> — atomic across every auth layer
 layers:      Keychain slots · native slot (agents) · launchctl · ~/.claude.json · daemon · shells
 safety:      every displaced credential archived first, fingerprint-verified
 diagnostics: doctor · status · probe (SHA-256 fingerprints, never secrets)
-wizard:      claude-account wizard: quotas, switch, renew and doctor with the arrow keys (Ink)
+wizard:      claude-account wizard: quotas, switch, add an account, rotation, renew, doctor (Ink)
 extras:      optional Orca integration · CLAUDE_NATIVE_BIN override
 ```
 
@@ -110,9 +110,10 @@ claude-account use personal
 
 | | Command | What it does |
 |:---:|---|---|
-| ➕ | `add-oauth <name>` | register a profile from a setup-token (validated before storing) |
+| ➕ | `add-oauth <name> [--token-stdin] [--account <email>] [--reserve]` | register a profile from a setup-token (validated against the API before storing); `--reserve` also puts it at the end of the autoswitch chain |
+|  | `rotation [set <a> [b] [more...]\|on\|off]` | show or set the order the autoswitch walks, and turn it on or off |
 | ♻️ | `renew <name>` | guided renewal of an expired setup-token: browser, check, store, measure |
-| 🧙 | `wizard` | interactive screen (arrow keys): accounts and quotas, switch, renew, doctor |
+| 🧙 | `wizard` | interactive screen (arrow keys): accounts and quotas, switch, add an account, rotation, renew, doctor |
 | 📥 | `import-native [name] [--last-login]` | import the current `/login` (or the last one `use` displaced) as a profile |
 | 🔁 | `use <name>` | switch every auth layer to that profile, atomically, the native slot included |
 | 📋 | `list` | profiles, the active one marked with `*` |
@@ -159,8 +160,17 @@ never opens a browser again.
 
 ## Wizard
 
-`claude-account wizard` is the same engine behind a screen: every profile with its 5h and 7d
-quota bars, then switch, renew or doctor with the arrow keys. Renewing a token walks the three
+`claude-account wizard` is the same engine behind a screen. The top shows whether the
+autoswitch is on, the order it walks (① ② ③), what it decided last, and which account the
+background sessions run on; below, every profile with its rank and its 5h and 7d quota bars. From
+there: switch (every session moves along), add an account, change the rotation or turn the
+autoswitch off, renew, full login, doctor. When the background sessions are not on the active
+account yet, the menu offers to move them now.
+
+Adding an account is one flow: a name, the browser login, the e-mail (optional), whether it joins
+the rotation, and then it is checked against the API, stored in the Keychain and measured. The
+token is never shown. At the end you can switch to it right away or also do the full login for the
+claude.ai connectors. Renewing a token walks the three
 steps (browser login, check, store) and never prints the token; the wizard reads the code prompt
 from `claude setup-token`, hands the code over and catches the token on the way to the Keychain.
 
@@ -172,7 +182,9 @@ from `claude setup-token`, hands the code over and catches the token on the way 
 
 It needs `node` (22 or newer, what Ink 7 requires) and `python3` (ships with the Xcode command line tools; it lends `claude setup-token` a pseudo-terminal); `install.sh` installs it when node is present and skips it
 otherwise, the CLI works the same without it. `renew <name>` does the same flow in plain bash,
-and `renew <name> --token-stdin` stores a token piped in (what the wizard calls).
+and `renew <name> --token-stdin` stores a token piped in (what the wizard calls); adding an
+account calls `add-oauth <name> --token-stdin`. Tests: `python3 tests/wizard-scenarios.py` drives
+the screen in a pseudo-terminal with every external command stubbed.
 
 ## Rate limits, automatic switching and the quota regime
 
