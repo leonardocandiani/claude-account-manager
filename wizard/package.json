@@ -1,0 +1,18 @@
+{
+  "name": "claude-account-wizard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Interactive terminal wizard for claude-account (switch, renew, doctor)",
+  "type": "module",
+  "main": "index.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.0.0"
+  }
+}
