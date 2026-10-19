@@ -102,5 +102,38 @@ else printf 'FAIL %-58s got %s\n' "no token in the environment falls back to the
 # 12. young window (10 min elapsed) and calm week: livre
 setup; measure 3 17400 12 400000 allowed false 0 9 allowed; expect "young window, no pace yet" livre
 
+# --- pool and rank follow the autoswitch: the whole chain, room = allowed and under exhausted_at ---
+chain3() {  # <active> <w5> <w7> <wst> <p5> <p7> <pst> <t5> <t7> <tst>; 7d windows 1 day old
+  printf '{"preferred":"work","fallback":"personal","reserves":["third"],"exhausted_at":{"five_hour":0.95,"seven_day":0.97}}' > "$H/policy.json"
+  printf '%s' "$1" > "$H/active"
+  jq -n --arg at "$(date -u -r $(( now - 60 )) +%Y-%m-%dT%H:%M:%SZ)" --argjson n "$now" \
+    --argjson w5 "$2" --argjson w7 "$3" --arg wst "$4" --argjson p5 "$5" --argjson p7 "$6" --arg pst "$7" \
+    --argjson t5 "$8" --argjson t7 "$9" --arg tst "${10}" '
+    def prof(u5; u7; st): {status: st, overage_in_use: false, util_5h: u5, reset_5h: ($n + 9000), util_7d: u7, reset_7d: ($n + 604800 - 86400)};
+    {measured_at: $at, profiles: {work: prof($w5; $w7; $wst), personal: prof($p5; $p7; $pst), third: prof($t5; $t7; $tst)}, history: {}}' > "$H/measure.json"
+}
+field() { "$REGIME" --json | jq -r ".$1"; }
+check_field() {  # <name> <field> <expected>
+  runs=$((runs + 1))
+  local got; got="$(field "$2")"
+  if [ "$got" = "$3" ]; then printf 'ok   %-58s %s\n' "$1" "$got"
+  else printf 'FAIL %-58s expected %s, got %s\n' "$1" "$3" "$got"; fails=$((fails + 1)); fi
+}
+# Fallback at 50% of the week one day in: its pace is high, but the autoswitch would use it.
+setup; chain3 work 60 40 allowed 10 50 allowed 99 99 rejected
+check_field "pool: an account the autoswitch would take counts" pool "reserva disponivel"
+# Fallback past exhausted_at (98% weekly) and the reserve rejected: nowhere to go.
+setup; chain3 work 60 40 allowed 10 98 allowed 10 10 rejected
+check_field "pool: past exhausted_at is no reserve" pool "sem reserva"
+# Only the third account has room: still a reserve.
+setup; chain3 work 60 40 allowed 99 99 rejected 10 10 allowed
+check_field "pool: the third account of the chain counts" pool "reserva disponivel"
+# Active and fallback rejected, the third allowed: the autoswitch moves, so no trava.
+setup; chain3 work 99 99 rejected 99 99 rejected 10 10 allowed
+runs=$((runs + 1)); if [ "$(field regime)" != trava ]; then printf 'ok   %-58s\n' "no trava while a reserve has room"; else printf 'FAIL no trava while a reserve has room: got trava\n'; fails=$((fails + 1)); fi
+# The rank is the position in the chain.
+setup; chain3 third 10 10 allowed 10 10 allowed 10 10 allowed
+check_field "rank of the third account is 3" marca 3
+
 printf '\n%d cases, %d failures\n' "$runs" "$fails"
 [ "$fails" -eq 0 ]

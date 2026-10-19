@@ -145,17 +145,19 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
   (cfg("pouso_min"; 30)) as $pouso_min | (cfg("hyst"; 2)) as $hyst |
   (cfg("hold_min"; 15)) as $hold_min | (cfg("stale_min"; 15)) as $stale_min |
   (cfg("floor7_h"; 24) * 3600) as $floor7 | (cfg("pool_softens"; true)) as $pool_softens |
-  ($policy.preferred // "") as $pref | ($policy.fallback // "") as $fall |
+  ($policy.preferred // "") as $pref |
+  ([$policy.preferred, $policy.fallback] + ($policy.reserves // []) | map(select(. != null and . != ""))) as $chain |
   (if $active != "" then $active else $pref end) as $acct |
-  (if $acct == $pref then $fall else $pref end) as $other |
-  ($m.profiles[$acct] // {}) as $p | ($m.profiles[$other] // {}) as $q |
+  ($chain | map(select(. != $acct)) | map($m.profiles[.] // {})) as $others |
+  ($m.profiles[$acct] // {}) as $p |
+  # the same room test as claude-account-autoswitch: allowed and under exhausted_at in both windows
+  (($policy.exhausted_at.five_hour // 0.95) * 100) as $x5 | (($policy.exhausted_at.seven_day // 0.97) * 100) as $x7 |
+  def room: (.status // "") == "allowed" and ((.util_5h // 0) < $x5) and ((.util_7d // 0) < $x7);
   ($m.measured_at // null) as $mat |
   (if $mat == null then null else ($mat | sub("Z$"; "") | strptime("%Y-%m-%dT%H:%M:%S") | mktime) end) as $mts |
   (if $mts == null then null else (($now - $mts) / 60 | floor) end) as $age_min |
   reserve($p.util_5h; $p.reset_5h; 18000; 900) as $r5 |
   reserve($p.util_7d; $p.reset_7d; 604800; $floor7) as $r7 |
-  reserve($q.util_5h; $q.reset_5h; 18000; 900) as $o5 |
-  reserve($q.util_7d; $q.reset_7d; 604800; $floor7) as $o7 |
   ([$r5, $r7] | map(select(. != null))) as $cands |
   (if ($cands | length) == 0 then null else ($cands | min) end) as $res |
   (if $res == null then "" elif $r5 == $res then "5h" else "7d" end) as $causa |
@@ -166,8 +168,8 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
   (($p.util_5h // 0) + $rate * $left5 < 100) as $cabe |
   # "out" is a measured fact (rejected, or paying overage); unknown is a dead probe, never a lock
   ((($p.status // "") == "rejected") or ($p.overage_in_use // false)) as $acct_out |
-  ((($q.status // "") == "rejected") or ($q.overage_in_use // false)) as $other_out |
-  ((($q.status // "") == "allowed") and ([$o5, $o7] | map(select(. != null)) | (length == 0 or min >= $th_att))) as $pool_room |
+  (($others | length) > 0 and ($others | all((.status // "") == "rejected" or (.overage_in_use // false)))) as $other_out |
+  ($others | any(room)) as $pool_room |
   (if $acct_out and $other_out then "trava"
    elif $res == null then "livre"
    elif $res >= $th_att then "livre"
@@ -198,7 +200,7 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    reserva: $res, reserva_5h: $r5, reserva_7d: $r7,
    reset: $reset, reset_em: (if $reset == null then null else ($reset - $now) end),
    reset_5h: $p.reset_5h, reset_7d: $p.reset_7d,
-   conta: $acct, marca: (if $acct == $pref then 1 else 2 end),
+   conta: $acct, marca: (($chain | index($acct)) // -1) + 1,
    pool: (if $pool_room then "reserva disponivel" else "sem reserva" end),
    override: (if $ov then "\($override.regime) ate \($override.until | strflocaltime("%H:%M"))" else "none" end),
    medido_ha_min: $age_min, medida_velha: $stale, pendente: ($ns.pending // null), pendente_n: ($ns.pending_n // 0),

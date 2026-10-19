@@ -132,7 +132,8 @@ em vez de pará-las: anota quais estão vivas, reinicia o daemon a partir do amb
 e retoma cada uma pelo mesmo id, com um prompt curto avisando que os monitores e shells em
 background morreram no reinício. Na troca manual, uma sessão ocupada é interrompida e volta com
 esse prompt. Na troca automática, a sessão ocupada adia a troca (o ciclo do autoswitch conclui
-quando todas estiverem ociosas, com `"move_agents": true` na política). O `claude-account bg-status` mostra se o
+quando todas estiverem ociosas, com `"move_agents": true` na política), a não ser que as sessões
+ainda estejam numa conta sem folga: aí o autoswitch move na hora, ocupadas ou não. O `claude-account bg-status` mostra se o
 daemon está no perfil ativo.
 
 O `claude-sessions` cuida delas uma a uma, sempre no perfil ativo:

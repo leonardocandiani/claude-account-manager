@@ -45,8 +45,11 @@ log() { printf '%s %s\n' "$(now_iso)" "$*" | tee -a "$LOG"; }
 if [ -e "$OFF" ]; then log "skip=kill_switch file=$OFF"; exit 0; fi
 
 # Opt-in (policy "move_agents": true): background sessions follow automatic switches,
-# and a move deferred while one was busy is finished here once they are all idle. A busy
-# session is never cut short from here (ADR-003); without the opt-in nothing is touched.
+# and a move deferred while one was busy is finished here once they are all idle. When
+# they sit on an account with no room left, waiting would leave them working on an
+# exhausted quota for hours (measured 16/10/2026), so the move is forced: a busy session
+# is cut and resumed by id with the wake prompt (force_stuck_move, ADR-007). Without the
+# opt-in nothing is touched.
 move_agents="$(jq -r '.move_agents // false' "$POLICY" 2>/dev/null || echo false)"
 if [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-restart.pending" ]; then
   log "bg_restart_pending $("$CLI" bg-restart --if-pending 2>&1 | tr '\n' ' ' | cut -c1-200)"
@@ -97,6 +100,17 @@ room() {
   awk -v u5="${u5:-0}" -v u7="${u7:-0}" -v t5="$2" -v t7="$3" 'BEGIN{exit !((u5+0) < (t5+0) && (u7+0) < (t7+0))}'
 }
 
+# The pending move is forced when the daemon still runs on an account of the chain that
+# has no room under exhausted_at. Runs before the decision and again right after a switch.
+force_stuck_move() {
+  [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-restart.pending" ] || return 0
+  local on
+  on="$(tr -d '[:space:]' < "$CONFIG_DIR/daemon-profile" 2>/dev/null || true)"
+  [ -n "$on" ] && in_chain "$on" || return 0
+  room "$(line_of "$on")" "$t5" "$t7" && return 0
+  log "bg_restart_forced sessions_on=$on (no room left) $("$CLI" bg-restart --force 2>&1 | tr '\n' ' ' | cut -c1-200)"
+}
+
 decision="$active"; reason=stay
 in_chain() { local p; for p in "${chain[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
 # first_with_room <t5> <t7> [except]: the first account of the chain under the thresholds.
@@ -108,6 +122,7 @@ first_with_room() {
   done
   return 1
 }
+force_stuck_move
 [ -z "$active" ] && active_eff="$pref" || active_eff="$active"
 # A manual switch is respected: when the active profile is not the one the last
 # automatic switch chose, a person picked it, and the switcher leaves it alone
@@ -184,6 +199,7 @@ if out="$("$CLI" use "$decision" "${use_args[@]}" 2>&1)"; then
     --arg from "$active" --arg to "$decision" --arg why "$reason" \
     '{day:$d,count:$c,lastSwitchAt:$t,from:$from,to:$to,reason:$why}' > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
   log "$summary switched=$active->$decision move=$(printf '%s' "$out" | grep -o 'bg-restart: .*' | head -1 | cut -c1-120)"
+  force_stuck_move
 else
   log "$summary switch_failed=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 fi

@@ -170,9 +170,13 @@ instead:
    that keeps the move pending, never "zero sessions".
 2. If one is `busy` or `shell` (alive with a background shell), defer: write
    `bg-restart.pending`; with `"move_agents": true` in the policy the autoswitch cycle finishes
-   the move once all are idle. Nothing headless ever forces a busy session (ADR-003);
-   a manual `use` or `login` forces the move (a busy session is cut and resumed with the wake
-   prompt, by decision of the operator, 2026-10-09), as does `bg-restart --force`.
+   the move once all are idle. A manual `use` or `login` forces the move (a busy session is
+   cut and resumed with the wake prompt, by decision of the operator, 2026-10-09), as does
+   `bg-restart --force`. The autoswitch forces it too, but only while the daemon still runs
+   on an account of the chain with no room under `exhausted_at`: on 2026-10-16 a deferred
+   move left the sessions on an account at 99% of its week for six hours while the account
+   switched to had room. A move away from an account that still has room keeps waiting for
+   idle (ADR-003 holds there).
 3. A detached worker (double fork plus `setsid`, because the caller is often one of the sessions
    about to stop) holds a lock, stops the daemon from the new profile's environment and resumes
    each session with `claude --bg --resume <sessionId> "<wake prompt>"`. A prompt alone keeps the

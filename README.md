@@ -134,7 +134,8 @@ sessions instead of stopping them: it snapshots them, restarts the daemon from t
 environment and resumes each one by id with a short prompt telling it that its monitors and
 background shells died in the restart. On a manual switch a busy session is cut and comes back
 with that prompt; on an automatic one it defers the move (the autoswitch cycle finishes it once
-they are all idle, with `"move_agents": true` in the policy). `claude-account bg-status` shows whether
+they are all idle, with `"move_agents": true` in the policy), unless the sessions are still on an
+account with no room left: then the autoswitch moves them right away, busy or not. `claude-account bg-status` shows whether
 the daemon runs on the active profile.
 
 `claude-sessions` handles them one at a time, always on the active profile:

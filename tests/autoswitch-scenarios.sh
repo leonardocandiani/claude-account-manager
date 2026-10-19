@@ -16,7 +16,10 @@ case "$1" in
     shift
     echo "profiles[$#]{name,status,http,util_5h,reset_5h,util_7d,reset_7d,overage,overage_in_use}:"
     for p in "$@"; do grep "^$p," "$CLAUDE_ACCOUNT_HOME/measured.csv" | sed 's/^/  /'; done ;;
-  use) shift; echo "use $*" >> "$CLAUDE_ACCOUNT_HOME/calls.log" ;;
+  use) shift; echo "use $*" >> "$CLAUDE_ACCOUNT_HOME/calls.log"
+    if [ -n "${STUB_DEFER:-}" ]; then echo "$1" > "$CLAUDE_ACCOUNT_HOME/bg-restart.pending"; fi ;;
+  bg-restart) echo "bg-restart ${2:-}${3:+ $3}" >> "$CLAUDE_ACCOUNT_HOME/calls.log"
+    case "$*" in *--force*) rm -f "$CLAUDE_ACCOUNT_HOME/bg-restart.pending" ;; esac ;;
   *) : ;;
 esac
 EOF
@@ -82,6 +85,32 @@ echo a > "$W/cfg/active"
 bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
 check "real run: use called on the reserve" "use c --no-restart" "$(cat "$W/cfg/calls.log")"
 check "real run: state records the reserve" c "$(jq -r .to "$W/cfg/autoswitch-state.json")"
+
+# Background sessions stuck on an exhausted account: the pending move is forced.
+policy '["c"]'; jq '.move_agents = true' "$W/cfg/policy.json" > "$W/p.tmp" && mv "$W/p.tmp" "$W/cfg/policy.json"
+rm -f "$W/cfg/calls.log" "$W/cfg/autoswitch-state.json"
+usage 0.99 0.5 0.99 0.5 0.1 0.1
+echo a > "$W/cfg/active"; echo a > "$W/cfg/daemon-profile"
+STUB_DEFER=1 bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "exhausted switch: the deferred move is forced in the same run" 1 "$(grep -c '^bg-restart --force' "$W/cfg/calls.log")"
+check "exhausted switch: the force is logged with the account" 1 "$(grep -c 'bg_restart_forced sessions_on=a' "$W/cfg/autoswitch.log")"
+
+# Sessions already on the new account, or the old one still with room: never forced.
+rm -f "$W/cfg/calls.log"; echo c > "$W/cfg/active"; echo c > "$W/cfg/daemon-profile"
+echo c > "$W/cfg/bg-restart.pending"; jq -n '{to:"c"}' > "$W/cfg/autoswitch-state.json"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "sessions on an account with room: not forced" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+rm -f "$W/cfg/calls.log"; usage 0.5 0.5 0.99 0.5 0.1 0.1
+echo b > "$W/cfg/active"; echo a > "$W/cfg/daemon-profile"; jq -n '{to:"b"}' > "$W/cfg/autoswitch-state.json"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "a return switch with the old account still alive: not forced" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+rm -f "$W/cfg/calls.log"; echo a > "$W/cfg/active"; echo z > "$W/cfg/daemon-profile"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "daemon on an account outside the chain: left alone" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+rm -f "$W/cfg/calls.log" "$W/cfg/bg-restart.pending"; usage 0.99 0.5 0.99 0.5 0.1 0.1
+echo a > "$W/cfg/daemon-profile"; echo a > "$W/cfg/active"; rm -f "$W/cfg/autoswitch-state.json"
+bash "$ROOT/bin/claude-account-autoswitch" --dry-run >/dev/null
+check "dry run never forces" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
 
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]
