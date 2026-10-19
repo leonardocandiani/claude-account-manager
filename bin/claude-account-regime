@@ -200,7 +200,7 @@ result=$(jq -n --argjson now "$now" --argjson policy "$policy" --argjson m "$mea
    reserva: $res, reserva_5h: $r5, reserva_7d: $r7,
    reset: $reset, reset_em: (if $reset == null then null else ($reset - $now) end),
    reset_5h: $p.reset_5h, reset_7d: $p.reset_7d,
-   conta: $acct, marca: (($chain | index($acct)) // -1) + 1,
+   conta: $acct, marca: ((($chain | index($acct)) // -1) + 1),
    pool: (if $pool_room then "reserva disponivel" else "sem reserva" end),
    override: (if $ov then "\($override.regime) ate \($override.until | strflocaltime("%H:%M"))" else "none" end),
    medido_ha_min: $age_min, medida_velha: $stale, pendente: ($ns.pending // null), pendente_n: ($ns.pending_n // 0),
