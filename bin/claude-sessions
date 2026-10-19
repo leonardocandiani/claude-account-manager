@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# Background sessions of Claude Code (the daemon behind `claude --bg`) in one
+# place: list, create, resume, rename, recolour, change mode, stop and move to
+# another account. New and resumed sessions go through `claude-account exec`, so
+# they start on the active profile. Name, colour and mode live in
+# ~/.claude/jobs/<id>/state.json (respawnFlags holds the flags a session is
+# reborn with) and apply after `claude respawn <id>`, which restarts that one
+# session and keeps its id. Resuming with any flag besides the prompt makes
+# Claude Code open a copy under a new id, so `resume` never passes one.
+# TOON on stdout, structured errors on stdout, exit 0 ok / 1 error / 2 usage.
+set -euo pipefail
+
+JOBS_DIR="$HOME/.claude/jobs"
+CA="${CLAUDE_ACCOUNT_BIN:-$HOME/bin/claude-account}"
+CA_HOME="${CLAUDE_ACCOUNT_HOME:-$HOME/.config/claude-account}"
+COLORS="red blue green yellow purple orange pink cyan"
+MODES="bypass auto default plan acceptEdits"
+
+NATIVE_BIN="${CLAUDE_NATIVE_BIN:-}"
+if [ -z "$NATIVE_BIN" ]; then
+  for c in "$HOME/.local/bin/claude-stable" "$HOME/.local/bin/claude"; do
+    [ -x "$c" ] && NATIVE_BIN="$c" && break
+  done
+fi
+
+fail() { # code, message, help, exit
+  printf 'error: %s\ncode: %s\nhelp: %s\n' "$2" "$1" "$3"
+  exit "${4:-1}"
+}
+usage() { fail USAGE "$1" "${2:-claude-sessions --help}" 2; }
+
+[ -n "$NATIVE_BIN" ] || fail CONFIG "Claude Code binary not found" "set CLAUDE_NATIVE_BIN=/path/to/claude"
+[ -x "$CA" ] || fail CONFIG "claude-account not installed at $CA" "run install.sh"
+command -v jq >/dev/null || fail CONFIG "jq not found" "brew install jq"
+
+show_help() {
+  cat <<'EOF'
+usage: claude-sessions [command] [options]
+
+  (no command)                          live background sessions and the daemon's profile
+  list [--all]                          same; --all adds the stopped ones
+  new --name N --dir D [--color C] [--mode M] [--model X] [--prompt T]
+                                        new background session on the active profile (mode: bypass)
+  resume <target> [--prompt T]          wake a stopped session, same id
+  rename <target> <name> [--force]      change the display name
+  color <target> <color> [--force]      colors: red blue green yellow purple orange pink cyan
+  mode <target> <mode> [--force]        modes: bypass auto default plan acceptEdits
+  stop <target>                         stop the session (the conversation is kept)
+  account [profile]                     daemon profile; with a profile, switch and move the sessions
+
+<target> is the short id (8 hex) or the exact session name.
+rename, color and mode restart a live session (claude respawn); a busy one needs --force.
+
+Examples:
+  claude-sessions new --name REPORTS --dir ~/work/app --color cyan --prompt "Build today's report"
+  claude-sessions color REPORTS red
+  claude-sessions account secondary
+EOF
+}
+
+# Live sessions as [{id,sessionId,name,status,cwd}], or exit 1 if the daemon does not answer.
+live_json() {
+  local raw
+  raw="$("$CA" exec agents --json 2>/dev/null)" || return 1
+  jq -ce 'if type == "array" then [.[] | select(.kind == "background") | {id, sessionId, name, status, cwd}] else error end' \
+    <<<"$raw" 2>/dev/null || return 1
+}
+
+mode_of() { # respawnFlags (json) -> mode
+  jq -r 'if index("--dangerously-skip-permissions") then "bypass"
+         elif index("--permission-mode") then (.[index("--permission-mode") + 1] | if . == "bypassPermissions" then "bypass" else . end)
+         else "default" end' <<<"$1"
+}
+
+# Resolves <target> to the short id of an existing job, in TARGET_ID (it prints
+# nothing: running it inside $(...) would swallow fail's message). A name matches
+# exactly, the live session first; two stopped jobs with that name are ambiguous.
+resolve() {
+  local target="$1" live="$2" id ids n
+  if [[ "$target" =~ ^[0-9a-f]{8}$ ]] && [ -f "$JOBS_DIR/$target/state.json" ]; then
+    TARGET_ID="$target"; return 0
+  fi
+  id="$(jq -r --arg a "$target" '[.[] | select(.name == $a) | .id][0] // empty' <<<"$live")"
+  [ -n "$id" ] && { TARGET_ID="$id"; return 0; }
+  ids="$(for f in "$JOBS_DIR"/*/state.json; do
+           [ -f "$f" ] && jq -r --arg a "$target" 'select(.name == $a) | .daemonShort // empty' "$f" 2>/dev/null
+         done | sort -u)"
+  n="$(printf '%s' "$ids" | grep -c . || true)"
+  [ "$n" -eq 1 ] && { TARGET_ID="$ids"; return 0; }
+  [ "$n" -gt 1 ] && fail AMBIGUOUS "more than one stopped session is named '$target': $(printf '%s' "$ids" | tr '\n' ' ')" "use the short id: claude-sessions list --all"
+  fail NOT_FOUND "no session with id or name '$target'" "claude-sessions list --all"
+}
+
+status_of() { jq -r --arg i "$1" '[.[] | select(.id == $i) | .status][0] // "stopped"' <<<"$2"; }
+
+# Edits the job's state.json (jq filter with $v) and restarts that session when
+# it is live. A busy one without --force is refused before anything is written.
+apply() { # id, live, force, filter, value
+  local id="$1" live="$2" force="$3" filter="$4" value="$5" st f="$JOBS_DIR/$1/state.json"
+  st="$(status_of "$id" "$live")"
+  if { [ "$st" = busy ] || [ "$st" = shell ]; } && [ "$force" != true ]; then
+    fail BUSY "session $id is $st; a respawn would cut its work short" "repeat with --force, or wait until it is idle"
+  fi
+  cp -p "$f" "$f.bak"
+  jq --arg v "$value" "$filter" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  if [ "$st" = stopped ]; then
+    printf 'applied: on next start\n'
+  else
+    "$NATIVE_BIN" respawn "$id" >/dev/null 2>&1 || fail RESPAWN_FAILED "wrote $f but the respawn failed" "claude respawn $id"
+    printf 'applied: now (respawn)\n'
+  fi
+}
+
+DROP='def drop(f): . as $a | [range(0; length)] | map(select(($a[.] | f) or (. > 0 and ($a[. - 1] | f) and ($a[.] | startswith("-") | not)) | not)) | map($a[.]);'
+
+cmd_list() {
+  local all=false live
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --all) all=true ;; -h|--help) show_help; exit 0 ;; *) usage "unknown option: $1" ;; esac
+    shift
+  done
+  live="$(live_json)" || fail DAEMON "could not list sessions (claude agents --json failed)" "claude agents"
+  printf 'active_profile: %s\ndaemon_profile: %s\npending_move: %s\n' \
+    "$(cat "$CA_HOME/active" 2>/dev/null || echo none)" \
+    "$(cat "$CA_HOME/daemon-profile" 2>/dev/null || echo unknown)" \
+    "$(cat "$CA_HOME/bg-restart.pending" 2>/dev/null || echo no)"
+  local rows="" id st f name color mode
+  while IFS=$'\t' read -r id st; do
+    [ -n "$id" ] || continue
+    f="$JOBS_DIR/$id/state.json"
+    if [ -f "$f" ]; then
+      name="$(jq -r '.name // "-"' "$f")"; color="$(jq -r '.color // "-"' "$f")"
+      mode="$(mode_of "$(jq -c '.respawnFlags // []' "$f")")"
+    else
+      name="$(jq -r --arg i "$id" '.[] | select(.id == $i) | .name // "-"' <<<"$live")"; color="-"; mode="?"
+    fi
+    rows+="  $id,\"${name//\"/\'}\",$st,$color,$mode"$'\n'
+  done < <(jq -r '.[] | [.id, .status] | @tsv' <<<"$live")
+  local n; n="$(jq length <<<"$live")"
+  printf 'sessions[%s]{id,name,status,color,mode}:\n%s' "$n" "$rows"
+  [ "$n" -eq 0 ] && printf '  (no live background session)\n'
+  if [ "$all" = true ]; then
+    local stopped=""
+    for f in "$JOBS_DIR"/*/state.json; do
+      [ -f "$f" ] || continue
+      id="$(jq -r '.daemonShort // empty' "$f")"
+      [ -n "$id" ] || continue
+      jq -e --arg i "$id" 'any(.[]; .id == $i)' <<<"$live" >/dev/null && continue
+      stopped+="  $id,\"$(jq -r '.name // "-"' "$f" | tr '"' "'")\",$(jq -r '.cwd // "-"' "$f"),$(jq -r '.updatedAt // "-" | .[0:16]' "$f")"$'\n'
+    done
+    printf 'stopped[%s]{id,name,dir,updated}:\n%s' "$(printf '%s' "$stopped" | grep -c . || true)" "$stopped"
+  fi
+  printf 'help[2]:\n  claude-sessions resume <id|name>\n  claude-sessions color <id|name> <color>\n'
+}
+
+cmd_new() {
+  local name="" dir="" color="" mode=bypass model="" prompt=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name) name="${2:-}"; shift ;;
+      --dir) dir="${2:-}"; shift ;;
+      --color) color="${2:-}"; shift ;;
+      --mode) mode="${2:-}"; shift ;;
+      --model) model="${2:-}"; shift ;;
+      --prompt) prompt="${2:-}"; shift ;;
+      -h|--help) show_help; exit 0 ;;
+      *) usage "unknown option: $1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] && [ -n "$dir" ] || usage "new needs --name and --dir" 'claude-sessions new --name N --dir D [--color C] [--prompt "..."]'
+  dir="${dir/#\~/$HOME}"
+  [ -d "$dir" ] || fail NOT_FOUND "directory does not exist: $dir" "check the path (is the volume mounted?)"
+  [ -z "$color" ] || [[ " $COLORS " == *" $color "* ]] || usage "invalid color: $color" "colors: $COLORS"
+  [[ " $MODES " == *" $mode "* ]] || usage "invalid mode: $mode" "modes: $MODES"
+  local live; live="$(live_json)" || fail DAEMON "could not list sessions" "claude agents"
+  if jq -e --arg n "$name" 'any(.[]; .name == $n)' <<<"$live" >/dev/null; then
+    fail EXISTS "a live session is already named '$name'" "claude-sessions resume '$name', or pick another name"
+  fi
+  local -a args=(--bg -n "$name")
+  case "$mode" in
+    bypass) args+=(--dangerously-skip-permissions) ;;
+    *) args+=(--permission-mode "$mode") ;;
+  esac
+  [ -n "$model" ] && args+=(--model "$model")
+  [ -n "$prompt" ] && args+=("$prompt")
+  local out id
+  out="$(cd "$dir" && "$CA" exec "${args[@]}" </dev/null 2>&1)" || fail START_FAILED "Claude Code refused to start the session: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)" "run 'claude' once in $dir if the folder is not trusted"
+  id="$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'backgrounded · [0-9a-f]{8}' | grep -oE '[0-9a-f]{8}' | head -1)"
+  [ -n "$id" ] || fail START_FAILED "no session id in the output: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)" "claude agents"
+  if [ -n "$color" ]; then
+    local tries=0
+    until [ -f "$JOBS_DIR/$id/state.json" ] || [ "$tries" -ge 10 ]; do sleep 1; tries=$((tries + 1)); done
+    [ -f "$JOBS_DIR/$id/state.json" ] || fail START_FAILED "session $id started, but its state.json never appeared to set the color" "claude-sessions color $id $color"
+    live="$(live_json)" || live='[]'
+    apply "$id" "$live" true '.color = $v' "$color" >/dev/null
+  fi
+  printf 'created: %s\nname: %s\ndir: %s\nmode: %s\ncolor: %s\nprofile: %s\n' "$id" "$name" "$dir" "$mode" "${color:--}" \
+    "$(cat "$CA_HOME/active" 2>/dev/null || echo ?)"
+  printf 'help[1]:\n  claude attach %s\n' "$id"
+}
+
+cmd_resume() {
+  local target="${1:-}" prompt=""
+  [ -n "$target" ] || usage "resume needs a target" "claude-sessions resume <id|name> [--prompt \"...\"]"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --prompt) prompt="${2:-}"; shift ;; *) usage "unknown option: $1" ;; esac
+    shift
+  done
+  local live id f sid cwd
+  live="$(live_json)" || fail DAEMON "could not list sessions" "claude agents"
+  resolve "$target" "$live"; id="$TARGET_ID"
+  if [ "$(status_of "$id" "$live")" != stopped ]; then
+    printf 'resumed: %s (already live, nothing to do)\n' "$id"; return 0
+  fi
+  f="$JOBS_DIR/$id/state.json"
+  sid="$(jq -r '.sessionId' "$f")"; cwd="$(jq -r '.cwd' "$f")"
+  [ -d "$cwd" ] || fail NOT_FOUND "the session's directory does not exist: $cwd" "mount the volume and try again"
+  local -a args=(--bg --resume "$sid")
+  [ -n "$prompt" ] && args+=("$prompt")
+  (cd "$cwd" && "$CA" exec "${args[@]}" </dev/null >/dev/null 2>&1) || fail START_FAILED "resuming session $id failed" "claude logs $id"
+  printf 'resumed: %s\nname: %s\n' "$id" "$(jq -r '.name // "-"' "$f")"
+}
+
+cmd_edit() { # rename|color|mode
+  local action="$1" target="${2:-}" value="${3:-}" force=false
+  [ -n "$target" ] && [ -n "$value" ] || usage "$action needs a target and a value" "claude-sessions $action <id|name> <value> [--force]"
+  shift 3
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --force) force=true ;; *) usage "unknown option: $1" ;; esac
+    shift
+  done
+  local live id f
+  live="$(live_json)" || fail DAEMON "could not list sessions" "claude agents"
+  resolve "$target" "$live"; id="$TARGET_ID"; f="$JOBS_DIR/$id/state.json"
+  case "$action" in
+    rename)
+      [ "$(jq -r '.name // empty' "$f")" = "$value" ] && { printf 'name: %s (unchanged)\n' "$value"; return 0; }
+      apply "$id" "$live" "$force" "$DROP"' .respawnFlags = (["--name", $v] + ((.respawnFlags // []) | drop(. == "--name" or . == "-n"))) | .name = $v | .nameSource = "user"' "$value"
+      printf 'name: %s\n' "$value" ;;
+    color)
+      [[ " $COLORS " == *" $value "* ]] || usage "invalid color: $value" "colors: $COLORS"
+      [ "$(jq -r '.color // empty' "$f")" = "$value" ] && { printf 'color: %s (unchanged)\n' "$value"; return 0; }
+      apply "$id" "$live" "$force" '.color = $v' "$value"
+      printf 'color: %s\n' "$value" ;;
+    mode)
+      [[ " $MODES " == *" $value "* ]] || usage "invalid mode: $value" "modes: $MODES"
+      [ "$(mode_of "$(jq -c '.respawnFlags // []' "$f")")" = "$value" ] && { printf 'mode: %s (unchanged)\n' "$value"; return 0; }
+      apply "$id" "$live" "$force" "$DROP"' .respawnFlags = ((.respawnFlags // []) | drop(. == "--permission-mode") | map(select(. != "--dangerously-skip-permissions"))
+        + (if $v == "bypass" then ["--dangerously-skip-permissions"] else ["--permission-mode", $v] end))' "$value"
+      printf 'mode: %s\n' "$value" ;;
+  esac
+  printf 'session: %s\n' "$id"
+}
+
+cmd_stop() {
+  local target="${1:-}"
+  [ -n "$target" ] || usage "stop needs a target" "claude-sessions stop <id|name>"
+  local live id
+  live="$(live_json)" || fail DAEMON "could not list sessions" "claude agents"
+  resolve "$target" "$live"; id="$TARGET_ID"
+  if [ "$(status_of "$id" "$live")" = stopped ]; then
+    printf 'stopped: %s (already stopped)\n' "$id"; return 0
+  fi
+  "$NATIVE_BIN" stop "$id" >/dev/null 2>&1 || fail STOP_FAILED "claude stop $id failed" "claude agents"
+  printf 'stopped: %s\nhelp[1]:\n  claude-sessions resume %s\n' "$id" "$id"
+}
+
+cmd_account() {
+  if [ -z "${1:-}" ]; then
+    "$CA" bg-status
+  else
+    "$CA" use "$1"
+  fi
+}
+
+command="${1:-list}"
+[ "$#" -gt 0 ] && shift
+case "$command" in
+  list) cmd_list "$@" ;;
+  new) cmd_new "$@" ;;
+  resume) cmd_resume "$@" ;;
+  rename|color|mode) cmd_edit "$command" "$@" ;;
+  stop) cmd_stop "$@" ;;
+  account) cmd_account "$@" ;;
+  -h|--help|help) show_help ;;
+  *) usage "unknown command: $command" ;;
+esac

@@ -47,6 +47,7 @@ cat > "$S/claude" <<'EOF'
 case "$1" in
   auth) if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then echo '{"loggedIn":true}'; else echo '{"loggedIn":false}'; fi ;;
   daemon) echo "$*" >> "$STUB_LOG" ;;
+  agents) echo '[]' ;;
 esac
 EOF
 chmod +x "$S/security" "$S/launchctl" "$S/claude"
@@ -91,16 +92,9 @@ check "use work: projected token has no refresh token" "null" "$(live .claudeAiO
 check "use work: MCP OAuth kept" "1" "$(live .mcpOAuth.srv)"
 check "use work: stray /login archived" "L1" "$(kc_get 'Claude Code-credentials-last-login-archive' | jq -r .claudeAiOauth.accessToken)"
 check "use work: launchctl carries the work token" "sk-ant-oat01-WORK" "$(cat "$STUB_LC/CLAUDE_CODE_OAUTH_TOKEN")"
-# Run from inside a background agent, `use` keeps the workers so it does not end itself.
-expected_stop="daemon stop --any"
-pid=$$
-while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-  case "$(ps -o command= -p "$pid" 2>/dev/null || true)" in
-    *"daemon run"*|*bg-pty-host*) expected_stop="daemon stop --any --keep-workers"; break ;;
-  esac
-  pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-done
-check "use work: daemon restarted ($expected_stop)" "$expected_stop" "$(tail -1 "$STUB_LOG")"
+# With no background session to move, the default `use` just stops the daemon so the next
+# one starts from the new profile; tests/bg-sessions-scenarios.sh covers the move itself.
+check "use work: no background session, daemon stopped" "daemon stop --any" "$(tail -1 "$STUB_LOG")"
 check "doctor passes after use" 1 "$(ca doctor | grep -c '\[ok\] native slot carries the active profile token')"
 check "status reports the projected slot" "native_slot=token" "$(ca status | grep '^native_slot=')"
 check "status fingerprint matches the profile" "native_fingerprint=$(fp sk-ant-oat01-WORK)" "$(ca status | grep '^native_fingerprint=')"

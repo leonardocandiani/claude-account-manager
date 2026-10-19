@@ -38,9 +38,18 @@ done
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { printf '%s %s\n' "$(now_iso)" "$*" | tee -a "$LOG"; }
 
+
 [ -x "$CLI" ] || { log "error=cli_missing path=$CLI"; exit 1; }
 [ -f "$POLICY" ] || { log "error=policy_missing path=$POLICY"; exit 1; }
 if [ -e "$OFF" ]; then log "skip=kill_switch file=$OFF"; exit 0; fi
+
+# Opt-in (policy "move_agents": true): background sessions follow automatic switches,
+# and a move deferred while one was busy is finished here once they are all idle. A busy
+# session is never cut short from here (ADR-003); without the opt-in nothing is touched.
+move_agents="$(jq -r '.move_agents // false' "$POLICY" 2>/dev/null || echo false)"
+if [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-restart.pending" ]; then
+  log "bg_restart_pending $("$CLI" bg-restart --if-pending 2>&1 | tr '\n' ' ' | cut -c1-200)"
+fi
 
 pref="$(jq -r '.preferred' "$POLICY")"
 fall="$(jq -r '.fallback' "$POLICY")"
@@ -84,7 +93,20 @@ room() {
 }
 
 decision="$active"; reason=stay
-if [ "$active" = "$pref" ] || [ -z "$active" ]; then
+# A manual switch is respected: when the active profile is not the one the last
+# automatic switch chose, a person picked it, and the switcher leaves it alone
+# unless it runs out of quota while the other profile still has room.
+last_to="$(jq -r '.to // empty' "$STATE" 2>/dev/null || true)"
+if [ -n "$active" ] && [ -n "$last_to" ] && [ "$active" != "$last_to" ] \
+   && { [ "$active" = "$pref" ] || [ "$active" = "$fall" ]; }; then
+  if [ "$active" = "$pref" ]; then line_active="$line_pref"; line_other="$line_fall"; other="$fall"
+  else line_active="$line_fall"; line_other="$line_pref"; other="$pref"; fi
+  if room "$line_active" "$t5" "$t7" || ! room "$line_other" "$t5" "$t7"; then
+    decision="$active"; reason=manual_choice_respected
+  else
+    decision="$other"; reason=manual_choice_exhausted
+  fi
+elif [ "$active" = "$pref" ] || [ -z "$active" ]; then
   if room "$line_pref" "$t5" "$t7"; then
     decision="$pref"; reason=preferred_has_room
   elif room "$line_fall" "$t5" "$t7"; then
@@ -134,12 +156,15 @@ if [ "$dry_run" = true ]; then
   exit 0
 fi
 
-# Headless: never restart Orca or kill anything; new processes pick the profile up.
-if out="$("$CLI" use "$decision" --no-restart 2>&1)"; then
+# Headless: never restart Orca or cut a session short. With move_agents, background
+# sessions are moved (same ids, deferred while one is busy).
+use_args=(--no-restart)
+[ "$move_agents" = true ] && use_args+=(--move-agents)
+if out="$("$CLI" use "$decision" "${use_args[@]}" 2>&1)"; then
   jq -n --arg d "$today" --argjson c $((count_today + 1)) --argjson t "$now_epoch" \
     --arg from "$active" --arg to "$decision" --arg why "$reason" \
     '{day:$d,count:$c,lastSwitchAt:$t,from:$from,to:$to,reason:$why}' > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
-  log "$summary switched=$active->$decision"
+  log "$summary switched=$active->$decision move=$(printf '%s' "$out" | grep -o 'bg-restart: .*' | head -1 | cut -c1-120)"
 else
   log "$summary switch_failed=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 fi

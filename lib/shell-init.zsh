@@ -10,7 +10,14 @@ if [ -r "$_CLAUDE_ACCOUNT_ACTIVE_FILE" ]; then
   if [ -r "$_CLAUDE_ACCOUNT_PROFILE" ] && command -v jq >/dev/null 2>&1; then
     _CLAUDE_ACCOUNT_TYPE="$(jq -r '.type // empty' "$_CLAUDE_ACCOUNT_PROFILE" 2>/dev/null)"
     _CLAUDE_ACCOUNT_SERVICE="$(jq -r '.keychainService // empty' "$_CLAUDE_ACCOUNT_PROFILE" 2>/dev/null)"
-    case "$_CLAUDE_ACCOUNT_TYPE" in
+    _CLAUDE_ACCOUNT_SECURE="$(jq -r '.secureStorageDir // empty' "$_CLAUDE_ACCOUNT_PROFILE" 2>/dev/null)"
+    unset CLAUDE_SECURESTORAGE_CONFIG_DIR
+    case "$_CLAUDE_ACCOUNT_TYPE${_CLAUDE_ACCOUNT_SECURE:+:full}" in
+      oauth_token:full)
+        # Full login in its own Keychain item: the token would win over it.
+        unset CLAUDE_CODE_OAUTH_TOKEN
+        export CLAUDE_SECURESTORAGE_CONFIG_DIR="$_CLAUDE_ACCOUNT_SECURE"
+        ;;
       oauth_token)
         _CLAUDE_ACCOUNT_TOKEN="$(security find-generic-password \
           -a "$USER" -s "$_CLAUDE_ACCOUNT_SERVICE" -w 2>/dev/null || true)"
@@ -27,4 +34,4 @@ if [ -r "$_CLAUDE_ACCOUNT_ACTIVE_FILE" ]; then
 fi
 
 unset _CLAUDE_ACCOUNT_HOME _CLAUDE_ACCOUNT_ACTIVE_FILE _CLAUDE_ACCOUNT_ACTIVE
-unset _CLAUDE_ACCOUNT_PROFILE _CLAUDE_ACCOUNT_TYPE _CLAUDE_ACCOUNT_SERVICE
+unset _CLAUDE_ACCOUNT_PROFILE _CLAUDE_ACCOUNT_TYPE _CLAUDE_ACCOUNT_SERVICE _CLAUDE_ACCOUNT_SECURE
