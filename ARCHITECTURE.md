@@ -220,6 +220,12 @@ against is the one its credential reported at `import-native` or `login`. A nati
 a measuring token is measured with its own access token, never refreshed for that, and an account
 without a reading is never treated as full.
 
+When `use` refuses a target, the autoswitch quarantines that account for `quarantine_hours`
+(default 6) and tries the next account with room in the same run, so a dead login never leaves
+the sessions on an exhausted account; with every candidate refused it stays and logs
+`no_healthy_account_left`. A quarantined account is skipped going down and coming back up,
+`rotation` shows it with the reason, and a manual `use` that works or `rotation release` lifts it.
+
 **Rejected.** Refreshing through the OAuth token endpoint directly: it ties the tool to a client id
 and an endpoint that Claude Code owns and may change. Trusting `auth status`: it said yes to the
 dead login that started this.

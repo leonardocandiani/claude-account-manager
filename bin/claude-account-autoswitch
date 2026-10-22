@@ -120,11 +120,32 @@ force_stuck_move() {
 
 decision="$active"; reason=stay
 in_chain() { local p; for p in "${chain[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
+# An account whose switch failed (a login that no longer signs in, refused by `use`) is
+# quarantined for quarantine_hours: no switch goes to it, and the next account with room is
+# tried in the same run. The quota reading alone cannot see a dead login: on 22/10/2026 the
+# measuring token said allowed while the login was revoked, and the run stopped on it.
+QUARANTINE="$CONFIG_DIR/autoswitch-quarantine.json"
+quar_h="$(jq -r '.quarantine_hours // 6' "$POLICY")"
+case "$quar_h" in ''|*[!0-9]*) quar_h=6 ;; esac
+quarantined() {
+  local until
+  until="$(jq -r --arg n "$1" '.[$n].until // 0' "$QUARANTINE" 2>/dev/null || echo 0)"
+  case "$until" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$until" -gt "$(date -u +%s)" ]
+}
+quarantine() { # name reason
+  local q
+  q="$(jq -ce 'if type == "object" then . else error end' "$QUARANTINE" 2>/dev/null || echo '{}')"
+  jq -n --argjson q "$q" --arg n "$1" --arg r "$2" --argjson u $(( $(date -u +%s) + quar_h * 3600 )) \
+    '$q + {($n): {until: $u, reason: $r}}' > "$QUARANTINE.tmp" && mv "$QUARANTINE.tmp" "$QUARANTINE"
+}
+
 # first_with_room <t5> <t7> [except]: the first account of the chain under the thresholds.
 first_with_room() {
   local p
   for p in "${chain[@]}"; do
     [ "$p" = "${3:-}" ] && continue
+    quarantined "$p" && continue
     room "$(line_of "$p")" "$1" "$2" && { printf '%s\n' "$p"; return 0; }
   done
   return 1
@@ -153,6 +174,7 @@ else
   up=""
   for p in "${chain[@]}"; do
     [ "$p" = "$active_eff" ] && break
+    quarantined "$p" && continue
     room "$(line_of "$p")" "$b5" "$b7" && { up="$p"; break; }
   done
   if [ -n "$up" ]; then
@@ -205,13 +227,34 @@ fi
 # sessions are moved (same ids, deferred while one is busy).
 use_args=(--no-restart)
 [ "$move_agents" = true ] && use_args+=(--move-agents)
-if out="$("$CLI" use "$decision" "${use_args[@]}" 2>&1)"; then
-  jq -n --arg d "$today" --argjson c $((count_today + 1)) --argjson t "$now_epoch" \
-    --arg from "$active" --arg to "$decision" --arg why "$reason" \
-    '{day:$d,count:$c,lastSwitchAt:$t,from:$from,to:$to,reason:$why}' > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
-  log "$summary switched=$active->$decision move=$(printf '%s' "$out" | grep -o 'bg-restart: .*' | head -1 | cut -c1-120)"
-  force_stuck_move
-else
-  log "$summary switch_failed=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
-fi
+# Each refused target is quarantined and the next account with room is tried, one per chain
+# member at most, so a dead login never leaves the sessions on an exhausted account.
+tries=0
+while [ -n "$decision" ] && [ "$decision" != "$active" ] && [ "$tries" -lt "${#chain[@]}" ]; do
+  tries=$((tries + 1))
+  if out="$("$CLI" use "$decision" "${use_args[@]}" 2>&1)"; then
+    jq -n --arg d "$today" --argjson c $((count_today + 1)) --argjson t "$now_epoch" \
+      --arg from "$active" --arg to "$decision" --arg why "$reason" \
+      '{day:$d,count:$c,lastSwitchAt:$t,from:$from,to:$to,reason:$why}' > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+    log "$summary switched=$active->$decision move=$(printf '%s' "$out" | grep -o 'bg-restart: .*' | head -1 | cut -c1-120)"
+    force_stuck_move
+    exit 0
+  fi
+  why="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/claude-account: ERROR: //' | cut -c1-200)"
+  quarantine "$decision" "$why"
+  log "$summary switch_failed=$decision quarantined=${quar_h}h reason=$why"
+  # A refused move up (back to a recovered account) is no reason to move down: while the
+  # active account still has room, it stays.
+  if measured_ok "$active_eff" && room "$(line_of "$active_eff")" "$t5" "$t7"; then
+    log "active=$active decision=$active reason=stays_after_failed_switch"
+    exit 0
+  fi
+  if next="$(first_with_room "$t5" "$t7" "$active_eff")" && [ "$next" != "$active" ]; then
+    summary="active=$active decision=$next reason=fallback_after_failed_switch"
+    decision="$next"
+  else
+    log "active=$active decision=$active reason=no_healthy_account_left (stays)"
+    exit 0
+  fi
+done
 exit 0

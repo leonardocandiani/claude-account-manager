@@ -164,5 +164,23 @@ lines="$(wc -l < "$STUB_MEASURE_LOG")"
 check "native with an expired login: unmeasurable, never refreshed to measure" "personal,unmeasurable" "$(ca measure personal | tail -1 | sed 's/^  //' | cut -d, -f1-2)"
 check "native with an expired login: no request sent" "$lines" "$(wc -l < "$STUB_MEASURE_LOG")"
 
+# The autoswitch's quarantine shows in `rotation`, `rotation release` lifts it, and a manual
+# switch that worked lifts it too.
+jq -n '{preferred:"work",fallback:"home",reserves:["personal"]}' > "$W/cfg/policy.json"
+jq -n --argjson u $(( $(date -u +%s) + 3600 )) '{personal:{until:$u,reason:"the login does not sign in"}, home:{until:$u,reason:"x"}}' > "$W/cfg/autoswitch-quarantine.json"
+check "rotation shows the quarantine" 1 "$(ca rotation | grep -c '^  3,personal,until [0-9:]*: the login does not sign in')"
+check "rotation shows a free account as -" 1 "$(ca rotation | grep -c '^  1,work,-$')"
+ca rotation release personal >/dev/null
+check "rotation release lifts it" 1 "$(ca rotation | grep -c '^  3,personal,-$')"
+ca use home --no-restart >/dev/null
+check "a manual switch that worked lifts it" 1 "$(ca rotation | grep -c '^  2,home,-$')"
+echo garbage > "$W/cfg/autoswitch-quarantine.json"
+set +e; ca use work --no-restart >/dev/null 2>&1; rc=$?; set -e
+check "garbage quarantine file: use still succeeds" "0 work" "$rc $(cat "$W/cfg/active")"
+check "garbage quarantine file: reset" "{}" "$(jq -c . "$W/cfg/autoswitch-quarantine.json")"
+echo garbage > "$W/cfg/autoswitch-quarantine.json"
+set +e; out="$(ca rotation)"; rc=$?; set -e
+check "garbage quarantine file: rotation still shows the chain" "0 1" "$rc $(printf '%s' "$out" | grep -c '^  1,work,-$')"
+
 printf '%d/%d passed\n' "$((runs - fails))" "$runs"
 [ "$fails" -eq 0 ]

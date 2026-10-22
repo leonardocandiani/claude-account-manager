@@ -111,7 +111,7 @@ claude-account use personal
 | | Command | What it does |
 |:---:|---|---|
 | ➕ | `add-oauth <name> [--token-stdin] [--account <email>] [--reserve]` | register a profile from a setup-token (validated against the API before storing); `--reserve` also puts it at the end of the autoswitch chain |
-|  | `rotation [set <a> [b] [more...]\|on\|off]` | show or set the order the autoswitch walks, and turn it on or off |
+|  | `rotation [set <a> [b] [more...]\|release <name>\|on\|off]` | show or set the order the autoswitch walks (with any account in quarantine), lift a quarantine, turn it on or off |
 | ♻️ | `renew <name>` | guided renewal of an expired setup-token: browser, check, store, measure |
 | 🧙 | `wizard` | interactive screen (arrow keys): accounts and quotas, switch, add an account, rotation, renew, doctor |
 | 📥 | `import-native [name] [--last-login]` | import the current `/login` (or the last one `use` displaced) as a profile |

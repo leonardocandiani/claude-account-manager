@@ -164,7 +164,7 @@ check_eq "12a no policy: empty chain stated" "$(printf '%s' "$out" | grep -c '^c
 "$CLI" rotation set leo-iacall proteauto >/dev/null
 check_eq "12b set writes preferred and fallback" "$(jq -c '[.preferred,.fallback,.reserves]' "$H/policy.json")" '["leo-iacall","proteauto",[]]'
 out="$("$CLI" rotation)"
-check_eq "12c show lists the chain in order" "$(printf '%s\n' "$out" | grep -E '^  [0-9],' | tr '\n' ' ')" "  1,leo-iacall   2,proteauto "
+check_eq "12c show lists the chain in order" "$(printf '%s\n' "$out" | grep -E '^  [0-9],' | tr '\n' ' ')" "  1,leo-iacall,-   2,proteauto,- "
 "$CLI" rotation set ghost proteauto >/dev/null 2>&1 && rc=0 || rc=$?
 check_eq "12d unknown profile refused" "$rc" "1"
 "$CLI" rotation set proteauto proteauto >/dev/null 2>&1 && rc=0 || rc=$?

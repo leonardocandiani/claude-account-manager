@@ -17,6 +17,7 @@ case "$1" in
     echo "profiles[$#]{name,status,http,util_5h,reset_5h,util_7d,reset_7d,overage,overage_in_use}:"
     for p in "$@"; do grep "^$p," "$CLAUDE_ACCOUNT_HOME/measured.csv" | sed 's/^/  /'; done ;;
   use) shift; echo "use $*" >> "$CLAUDE_ACCOUNT_HOME/calls.log"
+    case " ${STUB_USE_FAIL:-} " in *" $1 "*) echo "claude-account: ERROR: the login of profile '$1' does not sign in (refresh revoked)" >&2; exit 1 ;; esac
     if [ -n "${STUB_DEFER:-}" ]; then echo "$1" > "$CLAUDE_ACCOUNT_HOME/bg-restart.pending"; fi ;;
   bg-restart) echo "bg-restart ${2:-}${3:+ $3}" >> "$CLAUDE_ACCOUNT_HOME/calls.log"
     case "$*" in *--force*) rm -f "$CLAUDE_ACCOUNT_HOME/bg-restart.pending" ;; esac ;;
@@ -140,6 +141,49 @@ usage 0.5 0.5 0.1 0.1 0.1 0.1; unmeasured a
 bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
 check "sessions on an unmeasurable account: not forced" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
 rm -f "$W/cfg/bg-restart.pending"
+
+# --- A switch `use` refuses (dead login) quarantines that account and falls through to the
+# next one with room in the same run, never staying on the exhausted account. ---
+policy '["c"]'
+rm -f "$W/cfg/calls.log" "$W/cfg/autoswitch-state.json" "$W/cfg/autoswitch-quarantine.json" "$W/cfg/bg-restart.pending"
+usage 0.99 0.5 0.1 0.1 0.1 0.1
+echo a > "$W/cfg/active"; echo a > "$W/cfg/daemon-profile"
+STUB_USE_FAIL=b bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "refused target: tried, then the next one with room" "use b --no-restart|use c --no-restart" "$(paste -sd'|' "$W/cfg/calls.log")"
+check "refused target: the run ends on the healthy account" c "$(jq -r .to "$W/cfg/autoswitch-state.json")"
+check "refused target: quarantined with the reason" 1 "$(jq -r '.b.reason' "$W/cfg/autoswitch-quarantine.json" | grep -c 'does not sign in')"
+check "refused target: logged" 1 "$(grep -c 'switch_failed=b quarantined=6h' "$W/cfg/autoswitch.log")"
+# Quarantined: skipped even with room, both going down and coming back up.
+echo c > "$W/cfg/active"; jq -n '{to:"c"}' > "$W/cfg/autoswitch-state.json"
+usage 0.99 0.5 0.1 0.1 0.1 0.1
+check "quarantined account is no way back up" "decision=c reason=reserve_still_has_room" "$(decide c c)"
+usage 0.99 0.5 0.1 0.1 0.99 0.5
+check "quarantined account is no way down either" "decision=c reason=both_exhausted_stay" "$(decide c c)"
+# The quarantine ends by itself.
+jq '.b.until = 1' "$W/cfg/autoswitch-quarantine.json" > "$W/q.tmp" && mv "$W/q.tmp" "$W/cfg/autoswitch-quarantine.json"
+check "expired quarantine: the account counts again" "decision=b reason=fallback_recovered" "$(decide c c)"
+# Every candidate refused: the run stays where it is and says so.
+rm -f "$W/cfg/calls.log" "$W/cfg/autoswitch-quarantine.json" "$W/cfg/autoswitch-state.json"
+usage 0.99 0.5 0.1 0.1 0.1 0.1
+echo a > "$W/cfg/active"
+STUB_USE_FAIL="b c" bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "all refused: both tried once" "use b --no-restart|use c --no-restart" "$(paste -sd'|' "$W/cfg/calls.log")"
+check "all refused: stays and says so" 1 "$(tail -1 "$W/cfg/autoswitch.log" | grep -c 'reason=no_healthy_account_left')"
+check "all refused: active unchanged" a "$(cat "$W/cfg/active")"
+# A refused move up is no reason to move down: the active account still has room, it stays.
+rm -f "$W/cfg/calls.log" "$W/cfg/autoswitch-quarantine.json"
+usage 0.1 0.1 0.1 0.1 0.1 0.1
+echo b > "$W/cfg/active"; jq -n '{to:"b"}' > "$W/cfg/autoswitch-state.json"
+STUB_USE_FAIL=a bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "refused move up: only the refused one was tried" "use a --no-restart" "$(paste -sd'|' "$W/cfg/calls.log")"
+check "refused move up: stays on the active account" b "$(cat "$W/cfg/active")"
+check "refused move up: says so" 1 "$(tail -1 "$W/cfg/autoswitch.log" | grep -c 'reason=stays_after_failed_switch')"
+# An unreadable quarantine file never stops a run, and the next refusal rewrites it.
+echo garbage > "$W/cfg/autoswitch-quarantine.json"
+rm -f "$W/cfg/calls.log"
+STUB_USE_FAIL=a bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "garbage quarantine file: rewritten with the refusal" 1 "$(jq -r 'has("a")' "$W/cfg/autoswitch-quarantine.json" | grep -c true)"
+rm -f "$W/cfg/autoswitch-quarantine.json"
 
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]

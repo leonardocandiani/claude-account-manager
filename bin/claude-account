@@ -534,6 +534,32 @@ rotation_append() {
   note "rotation: '$1' added as account $(( ${#chain[@]} + 1 )) of the chain"
 }
 
+# The autoswitch quarantines an account whose switch was refused (see claude-account-autoswitch).
+QUARANTINE_FILE="$CONFIG_DIR/autoswitch-quarantine.json"
+
+# "-" when the account is free, else "until HH:MM: <reason>".
+quarantine_of() {
+  local until reason
+  until="$(jq -r --arg n "$1" '.[$n].until // 0' "$QUARANTINE_FILE" 2>/dev/null || echo 0)"
+  case "$until" in ''|*[!0-9]*) until=0 ;; esac
+  if [ "$until" -le "$(date -u +%s)" ]; then printf -- '-'; return 0; fi
+  reason="$(jq -r --arg n "$1" '.[$n].reason // ""' "$QUARANTINE_FILE" | tr ',' ';' | cut -c1-80)"
+  printf 'until %s: %s' "$(date -r "$until" +%H:%M)" "$reason"
+}
+
+# Never fails its caller: `use` calls it after the switch. An unreadable file is reset.
+quarantine_release() {
+  [ -f "$QUARANTINE_FILE" ] || return 0
+  if jq -e --arg n "$1" 'if type == "object" then del(.[$n]) else error end' "$QUARANTINE_FILE" \
+       > "$QUARANTINE_FILE.tmp" 2>/dev/null; then
+    mv "$QUARANTINE_FILE.tmp" "$QUARANTINE_FILE"
+  else
+    printf '{}\n' > "$QUARANTINE_FILE"
+    rm -f "$QUARANTINE_FILE.tmp"
+  fi
+  return 0
+}
+
 cmd_rotation() {
   local sub="${1:-}" chain=() p i
   shift || true
@@ -549,9 +575,13 @@ cmd_rotation() {
       [ "$(printf '%s\n' "$@" | sort | uniq -d)" = "" ] || usage_error "an account appears twice in the order"
       rotation_write "$@"
       note "rotation: $(printf '%s ' "$@" | sed 's/ $//; s/ / -> /g')" ;;
+    release)
+      [ "$#" -eq 1 ] || usage_error "usage: claude-account rotation release <name>"
+      quarantine_release "$1"
+      note "rotation: '$1' is out of quarantine; the autoswitch may switch to it again" ;;
     ""|show) ;;
-    -h|--help) printf 'usage: claude-account rotation [show|set <first> [second] [more...]|on|off]\n'; return 0 ;;
-    *) usage_error "unknown rotation command: $sub (show, set, on, off)" ;;
+    -h|--help) printf 'usage: claude-account rotation [show|set <first> [second] [more...]|release <name>|on|off]\n'; return 0 ;;
+    *) usage_error "unknown rotation command: $sub (show, set, release, on, off)" ;;
   esac
   while IFS= read -r p; do chain+=("$p"); done < <(rotation_chain)
   printf 'autoswitch: %s\n' "$([ -e "$CONFIG_DIR/autoswitch.off" ] && echo off || echo on)"
@@ -561,9 +591,13 @@ cmd_rotation() {
     printf 'help: claude-account rotation set <first> <second> [more...]\n'
     return 0
   fi
-  printf 'chain[%d]{rank,name}:\n' "${#chain[@]}"
-  i=1; for p in "${chain[@]}"; do printf '  %d,%s\n' "$i" "$p"; i=$((i + 1)); done
-  printf 'help: claude-account rotation set <first> <second> [more...] | rotation on|off\n'
+  printf 'chain[%d]{rank,name,quarantine}:\n' "${#chain[@]}"
+  i=1
+  for p in "${chain[@]}"; do
+    printf '  %d,%s,%s\n' "$i" "$p" "$(quarantine_of "$p")"
+    i=$((i + 1))
+  done
+  printf 'help: claude-account rotation set <first> <second> [more...] | rotation release <name> | rotation on|off\n'
 }
 
 # Guided renewal of an expired or revoked setup-token. Runs `claude setup-token`
@@ -1141,6 +1175,7 @@ cmd_use() {
   esac
 
   set_active "$name"
+  quarantine_release "$name"
   note "active profile: $name ($PROFILE_TYPE${SECURE_DIR:+, full login})"
   if [ "$restart" = true ]; then
     if [ "$keep_agents" = true ]; then

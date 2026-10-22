@@ -109,7 +109,7 @@ claude-account use pessoal
 | | Comando | O que faz |
 |:---:|---|---|
 | ➕ | `add-oauth <nome> [--token-stdin] [--account <email>] [--reserve]` | registra um perfil por setup-token (validado na API antes de guardar); `--reserve` já o põe no fim da cadeia do autoswitch |
-|  | `rotation [set <a> [b] [mais...]\|on\|off]` | mostra ou define a ordem que o autoswitch percorre, e liga ou desliga |
+|  | `rotation [set <a> [b] [mais...]\|release <nome>\|on\|off]` | mostra ou define a ordem que o autoswitch percorre (com a conta em quarentena, se houver), tira da quarentena, liga ou desliga |
 | ♻️ | `renew <nome>` | renovação guiada de um setup-token vencido: browser, checagem, guarda, medição |
 | 🧙 | `wizard` | tela interativa (setas): contas e cotas, trocar, adicionar conta, rodízio, renovar, doctor |
 | 📥 | `import-native [nome] [--last-login]` | importa o `/login` atual (ou o último que o `use` deslocou) como perfil |
