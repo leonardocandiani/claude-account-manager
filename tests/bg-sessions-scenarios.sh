@@ -14,7 +14,7 @@ fails=0; runs=0
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 S="$W/stub"; mkdir -p "$S" "$W/kc" "$W/lc" "$W/home/bin" "$W/home/.claude/jobs" "$W/cfg/profiles" "$W/login-work"
-export STUB_KC="$W/kc" STUB_LC="$W/lc" STUB_LOG="$W/claude.log" STUB_AGENTS="$W/agents.json" STUB_LOGGED="$W/logged-in"
+export STUB_KC="$W/kc" STUB_LC="$W/lc" STUB_LOG="$W/claude.log" STUB_AGENTS="$W/agents.json" STUB_LOGGED="$W/logged-in" STUB_EMAILS="$W/emails" STUB_REFRESH_LOG="$W/refresh.log"
 : > "$STUB_LOG"; echo '[]' > "$STUB_AGENTS"
 
 cat > "$S/security" <<'EOF'
@@ -34,6 +34,7 @@ case "$op" in
     [ -f "$f" ] || exit 44
     if $want; then cat "$f"; else printf '    "mdat"<timedate>=0x00  "%sZ\\000"\n' "$(cat "$f.mdat")"; fi ;;
   add-generic-password) printf %s "$val" > "$f"; date -u +%Y%m%d%H%M%S > "$f.mdat" ;;
+  delete-generic-password) [ -f "$f" ] || exit 44; rm -f "$f" "$f.mdat" ;;
 esac
 EOF
 cat > "$S/launchctl" <<'EOF'
@@ -48,7 +49,15 @@ EOF
 cat > "$S/claude" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
+  -p) exec "$(dirname "$0")/claude-p" ;;
   auth)
+    if [ "${2:-}" = login ]; then
+      # STUB_LOGIN_FAIL: the browser step breaks halfway, leaving a broken item behind.
+      item="Claude Code-credentials-$(printf '%s' "$CLAUDE_SECURESTORAGE_CONFIG_DIR" | shasum -a 256 | cut -c1-8)"
+      if [ -n "${STUB_LOGIN_FAIL:-}" ]; then security add-generic-password -U -a x -s "$item" -w '{}'; exit 1; fi
+      security add-generic-password -U -a x -s "$item" -w "{\"claudeAiOauth\":{\"accessToken\":\"${STUB_LOGIN_AS:-WN}\",\"refreshToken\":\"RL\",\"expiresAt\":4102444800000}}"
+      exit 0
+    fi
     if [ -n "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" ] && grep -qx "$CLAUDE_SECURESTORAGE_CONFIG_DIR" "$STUB_LOGGED" 2>/dev/null; then
       if [ -n "${STUB_NOEMAIL:-}" ]; then echo '{"loggedIn":true,"email":null}'
       elif [ -n "${STUB_OTHER:-}" ]; then echo '{"loggedIn":true,"email":"other@example.com"}'
@@ -61,6 +70,7 @@ case "$1" in
 esac
 EOF
 chmod +x "$S/security" "$S/launchctl" "$S/claude"
+. "$here/stub-login.sh"
 printf '#!/bin/sh\n' > "$W/home/bin/claude"; chmod +x "$W/home/bin/claude"
 printf 'source claude-account\n' > "$W/home/.zprofile"
 echo '{"permissions":{"defaultMode":"bypassPermissions"}}' > "$W/home/.claude/settings.json"
@@ -88,8 +98,8 @@ job() { # id sessionId name flags-json
 }
 
 # Profiles: a native one owning the slot, an OAuth one with a full login of its own.
-kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1"}}'
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1","expiresAt":4102444800000}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 kc_put "Claude Code OAuth Token - work" "sk-ant-oat01-WORK"
 jq -n '{version:2,name:"personal",type:"native_archive",keychainService:"Claude Code-credentials-personal-archive",label:"personal"}' > "$W/cfg/profiles/personal.json"
 jq -n --arg d "$W/login-work" '{version:2,name:"work",type:"oauth_token",keychainService:"Claude Code OAuth Token - work",label:"work",secureStorageDir:$d,account:"work@example.com"}' > "$W/cfg/profiles/work.json"
@@ -104,14 +114,21 @@ check "refusal left the active profile alone" personal "$(cat "$W/cfg/active")"
 
 # With the login present: launchctl points to the dir, no token, native slot untouched.
 echo "$W/login-work" > "$STUB_LOGGED"
+item_of() { printf 'Claude Code-credentials-%s' "$(printf '%s' "$1" | shasum -a 256 | cut -c1-8)"; }
+kc_put "$(item_of "$W/login-work")" '{"claudeAiOauth":{"accessToken":"W1","refreshToken":"RW1","expiresAt":4102444800000}}'
+echo "W1 work@example.com" > "$STUB_EMAILS"
 ca use work --no-restart >/dev/null
 check "use full-login: launchctl carries the secure-storage dir" "$W/login-work" "$(lc CLAUDE_SECURESTORAGE_CONFIG_DIR)"
 check "use full-login: no OAuth token in launchctl" absent "$(lc "$TOKEN_VAR")"
 check "use full-login: native slot keeps the native login" A1 "$(live .claudeAiOauth.accessToken)"
 check "doctor: full login signed in" 1 "$(ca doctor 2>/dev/null | grep -c '\[ok\] full login of the active profile is signed in')"
 check "doctor: launchctl on the full login" 1 "$(ca doctor 2>/dev/null | grep -c '\[ok\] launchctl points to the full login')"
-check "doctor: full login without e-mail metadata still ok" 1 "$(STUB_NOEMAIL=1 ca doctor 2>/dev/null | grep -c '\[ok\] full login of the active profile is signed in')"
-check "doctor: a login of another account fails" 1 "$(STUB_OTHER=1 ca doctor 2>/dev/null | grep -c '\[FAIL\] full login')"
+# 22/10/2026: a /login into another account rewrote the shared metadata, and the
+# healthy full login was refused on that e-mail. The credential's own identity decides.
+check "doctor: shared metadata of another account does not fail a healthy full login" 1 "$(STUB_OTHER=1 ca doctor 2>/dev/null | grep -c '\[ok\] full login of the active profile is signed in as work@example.com')"
+echo "W1 other@example.com" > "$STUB_EMAILS"
+check "doctor: a full login of another account fails" 1 "$(ca doctor 2>/dev/null | grep -c '\[FAIL\] full login .*signed in as other@example.com')"
+echo "W1 work@example.com" > "$STUB_EMAILS"
 check "exec exports the secure-storage dir" "$W/login-work" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv CLAUDE_SECURESTORAGE_CONFIG_DIR)"
 check "exec exports no OAuth token" "" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv "$TOKEN_VAR" || true)"
 
@@ -122,7 +139,7 @@ check "shell-init: full-login profile exports no token" "" "$(env "$TOKEN_VAR=st
 
 # The native login kept refreshing while the full-login profile was active; going back
 # must archive that live login, never restore the older archive over it.
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A2","refreshToken":"R2"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A2","refreshToken":"R2","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 ca use personal --no-restart >/dev/null
 check "back to native after full-login: live login kept" A2 "$(live .claudeAiOauth.accessToken)"
 check "back to native after full-login: archive refreshed" A2 "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
@@ -222,12 +239,12 @@ check "sessions new: a live name is taken" 1 "$rc"
 
 # Two native profiles with a full-login one in between: the slot's /login always goes back
 # to the profile that owns it, never to whichever profile was active last.
-kc_put "Claude Code-credentials-pb-archive" '{"claudeAiOauth":{"accessToken":"B1","refreshToken":"RB1"}}'
+kc_put "Claude Code-credentials-pb-archive" '{"claudeAiOauth":{"accessToken":"B1","refreshToken":"RB1","expiresAt":4102444800000}}'
 jq -n '{version:2,name:"pb",type:"native_archive",keychainService:"Claude Code-credentials-pb-archive",label:"pb"}' > "$W/cfg/profiles/pb.json"
 echo '[]' > "$STUB_AGENTS"
 ca use personal --no-restart >/dev/null
 ca use work --no-restart >/dev/null
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A3","refreshToken":"R3"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A3","refreshToken":"R3","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 ca use pb --no-restart >/dev/null
 check "native, full-login, other native: live login kept by its owner" A3 "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
 check "native, full-login, other native: the other's archive untouched" B1 "$(kc_get 'Claude Code-credentials-pb-archive' | jq -r .claudeAiOauth.accessToken)"
@@ -238,12 +255,123 @@ check "and back: the first login returns intact" A3 "$(live .claudeAiOauth.acces
 
 # Upgrade path: a native profile active with no owner record yet still owns the slot.
 rm -f "$W/cfg/native-owner"
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A4","refreshToken":"R4"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A4","refreshToken":"R4","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 ca use work --no-restart >/dev/null
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A5","refreshToken":"R5"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A5","refreshToken":"R5","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 ca use pb --no-restart >/dev/null
 ca use personal --no-restart >/dev/null
 check "no owner record, native active before: its refreshed login comes back" A5 "$(live .claudeAiOauth.accessToken)"
+
+# --- 22/10/2026, defect 1: a switch to a native login that no longer refreshes. ---
+# The archive said "allowed" through its measuring token while its own login was dead;
+# the switch went through and 22 sessions came back on "Login expired".
+kc_put "Claude Code-credentials-pb-archive" '{"claudeAiOauth":{"accessToken":"B9","refreshToken":"DEAD-B","expiresAt":1000},"mcpOAuth":{}}'
+set +e; out="$(ca use pb --no-restart 2>&1)"; rc=$?; set -e
+check "dead native archive: switch refused" 1 "$rc"
+check "dead native archive: the reason is the failed refresh" 1 "$(printf '%s' "$out" | grep -c 'does not sign in (Failed to authenticate: OAuth session expired')"
+check "dead native archive: active profile kept" personal "$(cat "$W/cfg/active")"
+check "dead native archive: the slot keeps the working login" A5 "$(live .claudeAiOauth.accessToken)"
+# Expired access token, live refresh token: switched, and the rotated login is kept.
+kc_put "Claude Code-credentials-pb-archive" '{"claudeAiOauth":{"accessToken":"B2","refreshToken":"RB2","expiresAt":1000}}'
+ca use pb --no-restart >/dev/null
+check "refreshable archive: switched" pb "$(cat "$W/cfg/active")"
+check "refreshable archive: rotated login written back" "B2-r RB2-r" "$(kc_get 'Claude Code-credentials-pb-archive' | jq -r '.claudeAiOauth | .accessToken + " " + .refreshToken')"
+check "refreshable archive: the slot carries the rotated login" B2-r "$(live .claudeAiOauth.accessToken)"
+
+# The bg-restart worker proves the daemon's credential before stopping it. When it fails,
+# only the switch is undone: the sessions never leave the daemon they were on.
+ca use work --no-restart >/dev/null
+echo work > "$W/cfg/daemon-profile"
+echo pb > "$W/cfg/active"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"DEAD1","refreshToken":"DEAD-R","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+jq -n --arg c "$W" '[{kind:"background",id:"aaaa1111",sessionId:"aaaa1111-0000-0000-0000-000000000001",name:"ALPHA",status:"idle",cwd:$c}]' > "$STUB_AGENTS"
+: > "$STUB_LOG"; : > "$W/cfg/bg-restart.log"; : > "$W/cfg/autoswitch.log"
+ca bg-restart --force >/dev/null; wait_worker
+check "canary: the broken login is caught before the stop" 1 "$(grep -c '^auth_canary_failed profile=pb' "$W/cfg/bg-restart.log")"
+check "canary: back to the sessions' profile" work "$(cat "$W/cfg/active")"
+check "canary: the rollback is in the autoswitch log" 1 "$(grep -c 'bg_restart_rolled_back from=pb to=work' "$W/cfg/autoswitch.log")"
+check "canary: the daemon is not stopped" 0 "$(grep -c 'daemon stop' "$STUB_LOG" || true)"
+check "canary: no session is resumed or cut" 0 "$(grep -c -- '--resume' "$STUB_LOG" || true)"
+check "canary: daemon still on the working profile" work "$(cat "$W/cfg/daemon-profile")"
+# No other profile to go back to: the daemon is left running, nothing is cut.
+echo pb > "$W/cfg/active"; echo pb > "$W/cfg/daemon-profile"
+: > "$STUB_LOG"; : > "$W/cfg/bg-restart.log"
+ca bg-restart --force >/dev/null; wait_worker
+check "canary without a way back: aborted" 1 "$(grep -c '^abort: no working profile' "$W/cfg/bg-restart.log")"
+check "canary without a way back: daemon not stopped" 0 "$(grep -c 'daemon stop' "$STUB_LOG" || true)"
+check "canary without a way back: logged for the autoswitch" 1 "$(grep -c 'bg_restart_rollback_failed profile=pb' "$W/cfg/autoswitch.log")"
+# The API not answering is no verdict on the login: the move goes on.
+echo work > "$W/cfg/active"; ca use work --no-restart >/dev/null; echo personal > "$W/cfg/daemon-profile"
+kc_put "$(item_of "$W/login-work")" '{"claudeAiOauth":{"accessToken":"NET1","refreshToken":"RN1","expiresAt":4102444800000}}'
+: > "$STUB_LOG"; : > "$W/cfg/bg-restart.log"
+ca bg-restart --force >/dev/null; wait_worker
+check "canary with the API down: noted, not a failure" 1 "$(grep -c '^auth_canary_unverified profile=work' "$W/cfg/bg-restart.log")"
+check "canary with the API down: the sessions are moved" 1 "$(grep -c -- '--resume aaaa1111' "$STUB_LOG")"
+kc_put "$(item_of "$W/login-work")" '{"claudeAiOauth":{"accessToken":"W1","refreshToken":"RW1","expiresAt":4102444800000}}'
+echo '[]' > "$STUB_AGENTS"
+
+# A refresh spends the old refresh token everywhere: the slot and its owner's archive hold
+# the same login, so a rotation in one is carried to the other.
+echo personal > "$W/cfg/native-owner"; echo personal > "$W/cfg/active"
+SAME='{"claudeAiOauth":{"accessToken":"S1","refreshToken":"RS1","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" "$SAME"; kc_put "Claude Code-credentials-personal-archive" "$SAME"
+pb_before="$(kc_get 'Claude Code-credentials-pb-archive')"
+ca import-native twin >/dev/null
+check "rotation by import: the new archive" "S1-r RS1-r" "$(kc_get 'Claude Code-credentials-twin-archive' | jq -r '.claudeAiOauth | .accessToken + " " + .refreshToken')"
+check "rotation by import: carried to the live slot" "S1-r RS1-r" "$(live '.claudeAiOauth | .accessToken + " " + .refreshToken')"
+check "rotation by import: carried to the owner's archive" "S1-r RS1-r" "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r '.claudeAiOauth | .accessToken + " " + .refreshToken')"
+check "rotation by import: the slot keeps its other keys" 1 "$(live .mcpOAuth.srv)"
+check "rotation by import: another login is not touched" "$pb_before" "$(kc_get 'Claude Code-credentials-pb-archive')"
+check "import records the account from the credential" x@example.com "$(jq -r .account "$W/cfg/profiles/twin.json")"
+rm -f "$W/cfg/profiles/twin.json"
+# Doctor only reads: a slot due for a refresh is a warning, and nothing is rotated.
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"S2","refreshToken":"RS2","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+: > "$STUB_REFRESH_LOG"
+check "doctor: a login due for a refresh is a warning" 1 "$(ca doctor 2>/dev/null | grep -c '\[warn\] the native login in the live slot was not verified')"
+check "doctor: nothing refreshed" 0 "$(wc -l < "$STUB_REFRESH_LOG" | tr -d ' ')"
+check "doctor: the slot is unchanged" RS2 "$(live .claudeAiOauth.refreshToken)"
+
+# sync-archive (the wizard's "Sync native archive"): the live login goes into its owner.
+echo personal > "$W/cfg/native-owner"; echo personal > "$W/cfg/active"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A7","refreshToken":"R7","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
+check "sync-archive: names the owner" 1 "$(ca sync-archive | grep -c "live login of 'personal' was copied")"
+check "sync-archive: archive refreshed" A7 "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+# With the owner's account recorded, a slot signed in as someone else never lands in it.
+jq '.account = "me@example.com"' "$W/cfg/profiles/personal.json" > "$W/p.tmp" && mv "$W/p.tmp" "$W/cfg/profiles/personal.json"
+echo "A8 stranger@example.com" >> "$STUB_EMAILS"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A8","refreshToken":"R8","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
+ca sync-archive >/dev/null
+check "sync-archive, slot of another account: owner's archive untouched" A7 "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+check "sync-archive, slot of another account: kept as the last login" A8 "$(kc_get 'Claude Code-credentials-last-login-archive' | jq -r .claudeAiOauth.accessToken)"
+
+# --- 22/10/2026, defect 3: `login` never leaves a broken full login behind. ---
+WITEM="$(item_of "$W/login-work")"
+kc_put "$WITEM" '{"claudeAiOauth":{"accessToken":"W1","refreshToken":"RW1","expiresAt":4102444800000}}'
+export STUB_LOGIN_FAIL=1
+set +e; out="$(ca login work 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_FAIL
+check "cancelled re-login: exit 1" 1 "$rc"
+check "cancelled re-login: says the previous state is back" 1 "$(printf '%s' "$out" | grep -c 'previous state was restored')"
+check "cancelled re-login: the working login is back" W1 "$(kc_get "$WITEM" | jq -r .claudeAiOauth.accessToken)"
+export STUB_LOGIN_AS=WX; echo "WX other@example.com" >> "$STUB_EMAILS"
+set +e; out="$(ca login work 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_AS
+check "re-login as another account: refused" 1 "$rc"
+check "re-login as another account: names both accounts" 1 "$(printf '%s' "$out" | grep -c "signed in as other@example.com, but profile 'work' is work@example.com")"
+check "re-login as another account: the working login is back" W1 "$(kc_get "$WITEM" | jq -r .claudeAiOauth.accessToken)"
+kc_put "Claude Code OAuth Token - fresh" "sk-ant-oat01-FRESH"
+jq -n '{version:2,name:"fresh",type:"oauth_token",keychainService:"Claude Code OAuth Token - fresh",label:"fresh"}' > "$W/cfg/profiles/fresh.json"
+export STUB_LOGIN_FAIL=1
+set +e; ca login fresh >/dev/null 2>&1; set -e
+unset STUB_LOGIN_FAIL
+check "first login that fails: no item left" absent "$(kc_get "$(item_of "$W/cfg/logins/fresh")" >/dev/null 2>&1 && echo present || echo absent)"
+check "first login that fails: no dir left" absent "$([ -d "$W/cfg/logins/fresh" ] && echo present || echo absent)"
+check "first login that fails: profile unchanged" null "$(jq -r '.secureStorageDir // null' "$W/cfg/profiles/fresh.json")"
+export STUB_LOGIN_AS=FN; echo "FN fresh@example.com" >> "$STUB_EMAILS"
+ca login fresh >/dev/null 2>&1
+unset STUB_LOGIN_AS
+check "first login: profile points to its dir" "$W/cfg/logins/fresh" "$(jq -r .secureStorageDir "$W/cfg/profiles/fresh.json")"
+check "first login: account from the credential" fresh@example.com "$(jq -r .account "$W/cfg/profiles/fresh.json")"
 
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]

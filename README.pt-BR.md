@@ -113,6 +113,7 @@ claude-account use pessoal
 | ♻️ | `renew <nome>` | renovação guiada de um setup-token vencido: browser, checagem, guarda, medição |
 | 🧙 | `wizard` | tela interativa (setas): contas e cotas, trocar, adicionar conta, rodízio, renovar, doctor |
 | 📥 | `import-native [nome] [--last-login]` | importa o `/login` atual (ou o último que o `use` deslocou) como perfil |
+|  | `sync-archive` | copia o `/login` vivo para o arquivo do perfil nativo dono dele |
 | 🔁 | `use <nome>` | troca todas as camadas de auth pro perfil, atomicamente, slot nativo incluído |
 | 📋 | `list` | perfis, o ativo marcado com `*` |
 | 🩺 | `doctor` | checa divergência em todas as camadas |

@@ -45,12 +45,14 @@ EOF
 cat > "$S/claude" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
+  -p) exec "$(dirname "$0")/claude-p" ;;
   auth) if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then echo '{"loggedIn":true}'; else echo '{"loggedIn":false}'; fi ;;
   daemon) echo "$*" >> "$STUB_LOG" ;;
   agents) echo '[]' ;;
 esac
 EOF
 chmod +x "$S/security" "$S/launchctl" "$S/claude"
+. "$here/stub-login.sh"
 printf '#!/bin/sh\n' > "$W/home/bin/claude"; chmod +x "$W/home/bin/claude"
 printf 'source claude-account\n' > "$W/home/.zprofile"
 
@@ -69,7 +71,7 @@ check() {  # <name> <expected> <got>
 mkdir -p "$W/cfg/profiles"
 kc_put "Claude Code OAuth Token - work" "sk-ant-oat01-WORK"
 kc_put "Claude Code OAuth Token - home" "sk-ant-oat01-HOME"
-kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1"}}'
+kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"A1","refreshToken":"R1","expiresAt":4102444800000}}'
 kc_put "Claude Code-credentials-empty-archive" '{"mcpOAuth":{}}'
 for p in work home; do
   printf '{"version":2,"name":"%s","type":"oauth_token","keychainService":"Claude Code OAuth Token - %s","label":"%s"}' "$p" "$p" "$p" > "$W/cfg/profiles/$p.json"
@@ -78,7 +80,7 @@ for p in personal empty; do
   printf '{"version":2,"name":"%s","type":"native_archive","keychainService":"Claude Code-credentials-%s-archive","label":"%s"}' "$p" "$p" "$p" > "$W/cfg/profiles/$p.json"
 done
 printf 'work\n' > "$W/cfg/active"
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"L1","refreshToken":"R9"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"L1","refreshToken":"R9","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 
 set +e
 out="$(ca doctor)"; rc=$?
@@ -112,7 +114,7 @@ check "use native: launchctl token removed" "absent" "$([ -f "$STUB_LC/CLAUDE_CO
 check "use --keep-agents: workers kept" "daemon stop --any --keep-workers" "$(tail -1 "$STUB_LOG")"
 
 # The native login rotates its tokens while active; leaving it refreshes its archive.
-kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A2","refreshToken":"R2"},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A2","refreshToken":"R2","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
 ca use work >/dev/null
 check "leaving a native profile refreshes its archive" "A2" "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
 
@@ -145,6 +147,22 @@ out="$(ca doctor)"; rc=$?
 set -e
 check "doctor fails on an expired token" 1 "$(printf '%s' "$out" | grep -c "\[FAIL\] setup-token of 'home' expired around")"
 check "an expired token fails the doctor" 1 "$rc"
+
+# --- 22/10/2026, defect 2: a native profile without a measuring token is measured with its
+# own login (the live one when it owns the slot), and only an expired one is unmeasurable.
+export STUB_MEASURE_LOG="$W/measure.log"
+: > "$STUB_MEASURE_LOG"
+kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"PA","refreshToken":"PR","expiresAt":4102444800000}}'
+check "native without a measuring token: measured by its archive" "personal,allowed,200,0.12" "$(ca measure personal | tail -1 | sed 's/^  //' | cut -d, -f1-4)"
+check "native without a measuring token: the archive's access token was used" PA "$(tail -1 "$STUB_MEASURE_LOG")"
+ca use personal --no-restart >/dev/null
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"PL","refreshToken":"PR2","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
+ca measure personal >/dev/null
+check "native owning the slot: measured by the live login" PL "$(tail -1 "$STUB_MEASURE_LOG")"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"PL","refreshToken":"PR2","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+lines="$(wc -l < "$STUB_MEASURE_LOG")"
+check "native with an expired login: unmeasurable, never refreshed to measure" "personal,unmeasurable" "$(ca measure personal | tail -1 | sed 's/^  //' | cut -d, -f1-2)"
+check "native with an expired login: no request sent" "$lines" "$(wc -l < "$STUB_MEASURE_LOG")"
 
 printf '%d/%d passed\n' "$((runs - fails))" "$runs"
 [ "$fails" -eq 0 ]

@@ -100,6 +100,12 @@ room() {
   awk -v u5="${u5:-0}" -v u7="${u7:-0}" -v t5="$2" -v t7="$3" 'BEGIN{exit !((u5+0) < (t5+0) && (u7+0) < (t7+0))}'
 }
 
+# 0 when the account has a real quota reading. No measuring token, an expired login or the
+# API down read as unmeasurable or unknown: that is no reading, never a full account.
+measured_ok() {
+  case "$(field "$(line_of "$1")" 2)" in allowed|rejected) return 0 ;; *) return 1 ;; esac
+}
+
 # The pending move is forced when the daemon still runs on an account of the chain that
 # has no room under exhausted_at. Runs before the decision and again right after a switch.
 force_stuck_move() {
@@ -107,6 +113,7 @@ force_stuck_move() {
   local on
   on="$(tr -d '[:space:]' < "$CONFIG_DIR/daemon-profile" 2>/dev/null || true)"
   [ -n "$on" ] && in_chain "$on" || return 0
+  measured_ok "$on" || return 0
   room "$(line_of "$on")" "$t5" "$t7" && return 0
   log "bg_restart_forced sessions_on=$on (no room left) $("$CLI" bg-restart --force 2>&1 | tr '\n' ' ' | cut -c1-200)"
 }
@@ -131,6 +138,10 @@ last_to="$(jq -r '.to // empty' "$STATE" 2>/dev/null || true)"
 if ! in_chain "$active_eff"; then
   # A profile outside the policy is active (manual choice); never override it.
   decision="$active"; reason=manual_profile_active
+elif ! measured_ok "$active_eff"; then
+  # Without a reading the switcher cannot tell full from fine; it stays (22/10/2026: a
+  # native profile without a measuring token read as exhausted and was left every 5 min).
+  decision="$active"; reason=active_unmeasured
 elif [ -n "$active" ] && [ -n "$last_to" ] && [ "$active" != "$last_to" ]; then
   if room "$(line_of "$active")" "$t5" "$t7" || ! next="$(first_with_room "$t5" "$t7" "$active")"; then
     decision="$active"; reason=manual_choice_respected

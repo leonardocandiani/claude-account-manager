@@ -204,7 +204,7 @@ function ProfileRow({ p, q, loading, pad = 16 }) {
     : !q ? h(Text, { color: C.muted }, 'not measured')
     : q.status === 'allowed' ? h(Text, { color: C.ok }, '✓ ok')
     : q.status === 'rejected' ? h(Text, { color: C.fail }, '✗ quota exhausted')
-    : q.status === 'unmeasurable' ? h(Text, { color: C.muted }, '- no measuring token')
+    : q.status === 'unmeasurable' ? h(Text, { color: C.muted }, '- no quota reading (not counted as full)')
     : h(Text, { color: C.fail }, `✗ token failing (HTTP ${q.http || '?'})`);
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
     h(Box, null, mark, rank, h(Text, { color: C.cream, bold: p.active }, p.name.padEnd(pad)), h(Text, { color: C.muted }, `${kind}  ${p.email || ''}`)),

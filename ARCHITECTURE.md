@@ -197,3 +197,29 @@ restart-orca.sh` skips the daemon, background sessions and in-flight `--bg` clie
 `claude-sessions` exposes the same mechanics one session at a time (create, resume, rename,
 colour, mode, stop), always on the active profile, so nothing needs to start the daemon with a
 bare `claude --bg` from an environment that may hold another account.
+
+
+## ADR-008: a login is proven before anything moves onto it
+
+**Context.** On 2026-10-22 the autoswitch moved 22 background sessions to a native profile
+whose archived `/login` no longer refreshed; every one came back on "Login expired". The
+measure said `allowed` (it reads a separate measuring token) and `claude auth status` said
+`loggedIn` (it reads the item's shape, not the server). The same day a healthy full login was
+refused because `auth status` reports the shared `oauthAccount` e-mail of whoever logged in last,
+and a native profile without a measuring token read `unmeasurable`, which the switcher took for
+exhausted and tried to leave every five minutes.
+
+**Decision.** `login_check` proves a stored login the way a session would use it: a live access
+token is asked whose it is (`/api/oauth/profile`); one expired or about to expire is refreshed by
+Claude Code itself in a scratch config (no hooks, plugins or CLAUDE.md) and the rotated login is
+written back, since a used refresh token stops working. It runs in `use` before any layer moves
+(native archives and full logins), in the bg-restart worker before the daemon stops (on failure the
+sessions go back to the profile they were on), in `doctor`, and in `login`, whose browser step is
+undone when it does not finish or signs in as another account. The identity a profile is checked
+against is the one its credential reported at `import-native` or `login`. A native profile without
+a measuring token is measured with its own access token, never refreshed for that, and an account
+without a reading is never treated as full.
+
+**Rejected.** Refreshing through the OAuth token endpoint directly: it ties the tool to a client id
+and an endpoint that Claude Code owns and may change. Trusting `auth status`: it said yes to the
+dead login that started this.

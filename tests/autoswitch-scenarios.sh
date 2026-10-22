@@ -112,5 +112,34 @@ echo a > "$W/cfg/daemon-profile"; echo a > "$W/cfg/active"; rm -f "$W/cfg/autosw
 bash "$ROOT/bin/claude-account-autoswitch" --dry-run >/dev/null
 check "dry run never forces" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
 
+# --- 22/10/2026, defect 2: an account without a quota reading is not a full account. ---
+# A native profile with no measuring token read "unmeasurable", and the switcher took that
+# as exhausted and tried to leave it every 5 minutes.
+unmeasured() { # name: replaces that account's line with an unmeasurable one
+  grep -v "^$1," "$W/cfg/measured.csv" > "$W/m.tmp"; echo "$1,unmeasurable,,,,,,," >> "$W/m.tmp"; mv "$W/m.tmp" "$W/cfg/measured.csv"
+}
+policy '["c"]'
+usage 0.1 0.1 0.1 0.1 0.1 0.1; unmeasured a
+check "unmeasurable preferred, active: stays" "decision=a reason=active_unmeasured" "$(decide a)"
+check "unmeasurable preferred picked by hand: stays" "decision=a reason=active_unmeasured" "$(decide a b)"
+usage 0.1 0.1 0.1 0.1 0.1 0.1; unmeasured b
+check "unmeasurable fallback, active: stays" "decision=b reason=active_unmeasured" "$(decide b)"
+usage 0.99 0.5 0.1 0.1 0.1 0.1; unmeasured b
+check "preferred exhausted, unmeasurable fallback skipped for the reserve" "decision=c reason=exhausted_next_has_room" "$(decide a)"
+usage 0.1 0.1 0.1 0.1 0.1 0.1; unmeasured a
+check "on the fallback, an unmeasurable preferred is no way back" "decision=b reason=fallback_still_has_room" "$(decide b)"
+rm -f "$W/cfg/calls.log"; echo a > "$W/cfg/active"; rm -f "$W/cfg/autoswitch-state.json"
+usage 0.1 0.1 0.1 0.1 0.1 0.1; unmeasured a
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "real run on an unmeasurable active: no use call" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c '^use')"
+# Sessions waiting on an unmeasurable account are not forced off it either.
+jq '.move_agents = true' "$W/cfg/policy.json" > "$W/p.tmp" && mv "$W/p.tmp" "$W/cfg/policy.json"
+rm -f "$W/cfg/calls.log"; echo b > "$W/cfg/active"; echo a > "$W/cfg/daemon-profile"
+echo b > "$W/cfg/bg-restart.pending"; jq -n '{to:"b"}' > "$W/cfg/autoswitch-state.json"
+usage 0.5 0.5 0.1 0.1 0.1 0.1; unmeasured a
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "sessions on an unmeasurable account: not forced" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+rm -f "$W/cfg/bg-restart.pending"
+
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]

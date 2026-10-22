@@ -115,6 +115,7 @@ claude-account use personal
 | ♻️ | `renew <name>` | guided renewal of an expired setup-token: browser, check, store, measure |
 | 🧙 | `wizard` | interactive screen (arrow keys): accounts and quotas, switch, add an account, rotation, renew, doctor |
 | 📥 | `import-native [name] [--last-login]` | import the current `/login` (or the last one `use` displaced) as a profile |
+|  | `sync-archive` | copy the live `/login` into the archive of the native profile that owns it |
 | 🔁 | `use <name>` | switch every auth layer to that profile, atomically, the native slot included |
 | 📋 | `list` | profiles, the active one marked with `*` |
 | 🩺 | `doctor` | check every auth layer for divergence |
