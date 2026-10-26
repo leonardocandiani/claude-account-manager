@@ -43,6 +43,9 @@ DAEMON_PROFILE_FILE="$CONFIG_DIR/daemon-profile"
 # Which native profile's /login sits in the live slot. A full-login profile leaves the
 # slot alone, so after one the owner is not the previous profile.
 NATIVE_OWNER_FILE="$CONFIG_DIR/native-owner"
+# Written there when the slot holds a /login that no profile owns: nothing archives it into
+# a profile (it goes to the last-login archive), and no active profile is assumed to own it.
+NO_OWNER="-"
 BG_LOCK_STALE_MIN=10
 # Pause between the worker's steps (stop, resume, identity check); tests set it to 0.
 BG_SETTLE_S="${CLAUDE_ACCOUNT_BG_SETTLE:-2}"
@@ -94,7 +97,7 @@ ensure_base() {
 
 validate_name() {
   case "${1:-}" in
-    ''|*[!a-zA-Z0-9._-]*) usage_error "invalid profile name: use letters, digits, dot, _ or -" ;;
+    ''|-|*[!a-zA-Z0-9._-]*) usage_error "invalid profile name: use letters, digits, dot, _ or - (and not a lone -)" ;;
   esac
 }
 
@@ -762,30 +765,128 @@ cmd_import_native() {
   shift || true
   validate_name "$name"
   from="$NATIVE_SERVICE"
-  case "${1:-}" in
-    '') ;;
-    --last-login) from="$LAST_LOGIN_ARCHIVE" ;;
-    *) usage_error "unknown option: $1" ;;
-  esac
+  unverified=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --last-login) from="$LAST_LOGIN_ARCHIVE" ;;
+      --unverified) unverified=true ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
   keychain_get "$from" | jq -e '(.claudeAiOauth.refreshToken // "") != ""' >/dev/null 2>&1 || \
-    die "'$from' holds no /login (only a projected setup-token or MCP keys); log in with /login first"
+    die "'$from' holds no /login (only a projected setup-token or MCP keys); to log '$name' in: claude-account login $name"
   service="Claude Code-credentials-$name-archive"
-  copy_keychain_item "$from" "$service"
   # Whose login this is comes from the credential itself (auth status reports the shared
-  # metadata of the last login); it is what switches and archiving check against later.
+  # metadata of the last login), and it is checked before anything is written: on
+  # 26/10/2026 a re-import of 'proteauto' took the live slot, which held another account's
+  # login, and turned the profile into a second copy of that account.
   email=""
-  if login_check "$service"; then
+  if login_check "$from"; then
     email="$LOGIN_EMAIL"
-  else
-    note "warning: the imported login does not sign in now ($LOGIN_FAIL); switching to '$name' will be refused until it does"
   fi
-  write_profile "$name" native_archive "$service" "$name (native login${email:+ $email})"
+  if [ -z "$email" ]; then
+    # Unknown identity fails closed: copying it is how a profile became another account.
+    [ "$unverified" = true ] || die "could not tell whose login '$from' holds (${LOGIN_FAIL:-the API gave no e-mail}); nothing was imported; to log '$name' in: claude-account login $name (or import-native $name --unverified to copy it anyway)"
+    note "warning: importing a login whose account could not be checked (${LOGIN_FAIL:-no e-mail}); switching to '$name' will be refused until it signs in"
+  else
+    existing="$(jq -r '.account // empty' "$(profile_file "$name")" 2>/dev/null || true)"
+    if [ -n "$existing" ] && [ "$existing" != "$email" ]; then
+      die "the login in '$from' is $email, but profile '$name' is $existing; nothing was imported; to log '$name' in again: claude-account login $name"
+    fi
+    for f in "$PROFILES_DIR"/*.json; do
+      [ -f "$f" ] || continue
+      other="$(jq -r '.name' "$f")"
+      [ "$other" != "$name" ] && [ "$(jq -r '.account // empty' "$f")" = "$email" ] || continue
+      die "the login in '$from' is $email, which is profile '$other' already; nothing was imported; to log '$name' in: claude-account login $name"
+    done
+  fi
+  copy_keychain_item "$from" "$service"
+  if [ -f "$(profile_file "$name")" ]; then
+    # A re-import keeps what the profile already carries (its measuring token, above all).
+    tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+    jq --arg s "$service" --arg l "$name (native login${email:+ $email})" \
+      '.type = "native_archive" | .keychainService = $s | .label = $l' "$(profile_file "$name")" > "$tmp" \
+      && chmod 600 "$tmp" && mv "$tmp" "$(profile_file "$name")"
+  else
+    write_profile "$name" native_archive "$service" "$name (native login${email:+ $email})"
+  fi
   if [ -n "$email" ]; then
     tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
     jq --arg a "$email" '.account = $a' "$(profile_file "$name")" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$(profile_file "$name")"
   fi
   [ "$from" = "$NATIVE_SERVICE" ] && printf '%s\n' "$name" > "$NATIVE_OWNER_FILE"
   note "native credential imported as profile '$name'${email:+ ($email)}"
+}
+
+# Browser login for a native profile that lands straight in its archive. The login runs
+# in a scratch config, so the live slot, the sessions reading it and the shared metadata
+# stay as they are; `/login` inside Claude Code would have moved all of them to the new
+# account. The identity is checked against the profile before the archive is replaced.
+# The scratch login holds a fresh refresh token: it never outlives the command, whatever
+# ends it (a failure under set -e, Ctrl-C in the browser step).
+login_native_cleanup() {
+  [ -z "${LN_ITEM:-}" ] || security delete-generic-password -a "$USER" -s "$LN_ITEM" >/dev/null 2>&1 || true
+  [ -z "${LN_DIR:-}" ] || rm -rf "$LN_DIR" || true
+  LN_ITEM=""; LN_DIR=""
+}
+
+login_native() {
+  local name="$1" expected new old old_rt live_rt f
+  expected="$(jq -r '.account // empty' "$PROFILE_FILE")"
+  LN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-account-login.XXXXXX")"
+  LN_ITEM="$(secure_item_of "$LN_DIR")"
+  trap login_native_cleanup EXIT
+  trap 'login_native_cleanup; exit 130' INT TERM
+  note "login: sign in as ${expected:-the '$name' account} in the browser; the live slot and the sessions on it are not touched"
+  env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR="$LN_DIR" CLAUDE_CONFIG_DIR="$LN_DIR" \
+    "$NATIVE_BIN" auth login ${expected:+--email "$expected"} || die "login did not finish; profile '$name' is unchanged"
+  login_check "$LN_ITEM" || die "login: the new login does not sign in ($LOGIN_FAIL); profile '$name' is unchanged"
+  [ -n "$LOGIN_EMAIL" ] || die "login: could not tell which account signed in; profile '$name' is unchanged"
+  if [ -n "$expected" ] && [ "$LOGIN_EMAIL" != "$expected" ]; then
+    die "login: signed in as $LOGIN_EMAIL, but profile '$name' is $expected; run it again and pick that account in the browser"
+  fi
+  for f in "$PROFILES_DIR"/*.json; do
+    [ -f "$f" ] && [ "$(jq -r '.name' "$f")" != "$name" ] && [ "$(jq -r '.account // empty' "$f")" = "$LOGIN_EMAIL" ] || continue
+    die "login: signed in as $LOGIN_EMAIL, which is profile '$(jq -r '.name' "$f")' already; run it again and pick the '$name' account in the browser"
+  done
+  new="$(keychain_get "$LN_ITEM")" || die "login: the new login was not stored; profile '$name' is unchanged"
+  old="$(keychain_get "$KEYCHAIN_SERVICE" || true)"
+  old_rt="$(jq -r '.claudeAiOauth.refreshToken // empty' <<<"$old" 2>/dev/null || true)"
+  printf '%s' "$old" | jq -e 'type == "object"' >/dev/null 2>&1 || old='{}'
+  old="$(printf '%s\n%s\n' "$old" "$new" | jq -cs '.[0] + {claudeAiOauth: .[1].claudeAiOauth}')"
+  security add-generic-password -U -a "$USER" -s "$KEYCHAIN_SERVICE" -w "$old" >/dev/null
+  # When this profile owns the live slot, the slot is where `use` and the next archiving
+  # read its login from. It gets the fresh login only when it still holds this profile's
+  # login (the same refresh token as the archive had); anything else in it is someone's
+  # login that nobody else keeps, so it is saved as the last-login archive, left in place,
+  # and the slot is marked as owned by no profile.
+  if [ "$(cat "$NATIVE_OWNER_FILE" 2>/dev/null || true)" = "$name" ] && [ "$(live_native_kind)" = login ]; then
+    live_rt="$(live_native_blob | jq -r '.claudeAiOauth.refreshToken // empty' 2>/dev/null || true)"
+    if [ -n "$old_rt" ] && [ "$live_rt" = "$old_rt" ]; then
+      restore_native_active "$KEYCHAIN_SERVICE"
+    else
+      archive_native_if_present "$LAST_LOGIN_ARCHIVE"
+      printf '%s\n' "$NO_OWNER" > "$NATIVE_OWNER_FILE"
+      note "the live slot holds another login: kept as '$LAST_LOGIN_ARCHIVE' and left in place; 'claude-account use $name' moves the sessions onto the fresh login"
+    fi
+    unset live_rt
+  fi
+  unset old_rt
+  unset new old
+  trap - EXIT INT TERM
+  login_native_cleanup
+  if [ -z "$expected" ]; then
+    tmp="$(mktemp "$PROFILES_DIR/.profile.XXXXXX")"
+    jq --arg a "$LOGIN_EMAIL" '.account = $a' "$PROFILE_FILE" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$PROFILE_FILE"
+  fi
+  quarantine_release "$name"
+  note "login: profile '$name' now holds a fresh login of ${LOGIN_EMAIL:-?}"
+  if [ "$(active_name 2>/dev/null || true)" = "$name" ]; then
+    note "help: claude-account use $name (moves the sessions onto the fresh login)"
+  else
+    note "help: claude-account use $name"
+  fi
 }
 
 # The account a secureStorageDir profile really runs on: its own Keychain item signs in,
@@ -821,7 +922,10 @@ cmd_login() {
   shift
   [ "$#" -eq 0 ] || usage_error "unknown option: $1"
   load_profile "$name"
-  [ "$PROFILE_TYPE" = oauth_token ] || die "profile '$name' is a native login already; it loads the claude.ai connectors as is"
+  if [ "$PROFILE_TYPE" = native_archive ]; then
+    login_native "$name"
+    return 0
+  fi
   LOGIN_DIR="$CONFIG_DIR/logins/$name"
   mkdir -p "$LOGIN_DIR"
   chmod 700 "$CONFIG_DIR/logins" "$LOGIN_DIR"
@@ -1069,6 +1173,10 @@ cmd_bg_status() {
 archive_live_login() {
   local owner_file expected live_at email
   owner="$(cat "$NATIVE_OWNER_FILE" 2>/dev/null || true)"
+  if [ "$owner" = "$NO_OWNER" ]; then
+    [ "$(live_native_kind)" = login ] && archive_native_if_present "$LAST_LOGIN_ARCHIVE"
+    return 0
+  fi
   if [ -z "$owner" ]; then
     # No record yet (installed while a native profile was active): that profile owns it.
     current="$(active_name 2>/dev/null || true)"
@@ -1145,9 +1253,9 @@ cmd_use() {
         src="$NATIVE_SERVICE"
       fi
       keychain_get "$src" | jq -e '(.claudeAiOauth.refreshToken // "") != ""' >/dev/null 2>&1 || \
-        die "the archive of profile '$name' holds no /login; log in with /login, then: claude-account import-native $name"
+        die "the archive of profile '$name' holds no /login; fix: claude-account login $name (browser, the sessions are not touched)"
       login_matches "$src" "$(jq -r '.account // empty' "$PROFILE_FILE")" || \
-        die "the login of profile '$name' does not sign in ($LOGIN_FAIL); nothing was switched; fix: /login as that account inside Claude Code, then: claude-account import-native $name"
+        die "the login of profile '$name' does not sign in ($LOGIN_FAIL); nothing was switched; fix: claude-account login $name (browser, the sessions are not touched)"
       ;;
   esac
 
@@ -1350,7 +1458,7 @@ cmd_doctor() {
       elif [ -n "$LOGIN_STALE$LOGIN_UNREACHABLE" ]; then
         echo "[warn] the native login in the live slot was not verified: $LOGIN_FAIL"
       else
-        echo "[FAIL] the native login in the live slot does not sign in: $LOGIN_FAIL (fix: /login inside Claude Code, then: claude-account import-native $active)"; failures=$((failures + 1))
+        echo "[FAIL] the native login in the live slot does not sign in: $LOGIN_FAIL (fix: claude-account login $active, then: claude-account use $active)"; failures=$((failures + 1))
       fi
       live="$(live_native_access_fingerprint || true)"
       if [ -n "$live" ] && [ "$live" = "$(access_fingerprint_of "$KEYCHAIN_SERVICE" || true)" ]; then
@@ -1501,7 +1609,8 @@ Usage:
                                                     account (bg-restart) and restarts Orca if
                                                     installed. --keep-agents leaves them on the old
                                                     one; --no-restart --move-agents moves them only
-  claude-account login <name>                       one-time full login for an OAuth profile
+  claude-account login <name>                       browser login: a full login for an OAuth profile, a fresh
+                                                    login for a native one (the live slot is not touched)
                                                     (claude.ai connectors; own Keychain item)
   claude-account bg-restart [--force] [--if-pending] move background sessions to the active
                                                     profile, same ids (deferred while one is busy)

@@ -124,7 +124,7 @@ claude-account use personal
 | 📈 | `measure [name...]` | 5h and 7d rate-limit state per profile, read from response headers |
 | 🚦 | `regime [--json]` | one word saying what the quota allows right now |
 | ▶️ | `exec [args...]` | run the native binary under the active profile (what the wrapper does) |
-|  | `login <name>` | one-time full login for an OAuth profile, in its own Keychain item (claude.ai connectors) |
+|  | `login <name>` | browser login: for an OAuth profile, a full login in its own Keychain item (claude.ai connectors); for a native profile, a fresh login straight into its archive, without touching the live slot or the sessions on it |
 |  | `bg-restart [--force]` | move background sessions to the active profile, same ids (deferred while one is busy) |
 |  | `bg-status` | active profile vs the daemon's, background sessions, pending move |
 

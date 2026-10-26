@@ -2,7 +2,7 @@
 # Writes two stubs for the login check, so no test reaches the network:
 #   curl     answers /api/oauth/profile: a Bearer token starting with DEAD is refused (401);
 #            any other one is the account named in $STUB_EMAILS ("<token> <email>" lines),
-#            or x@example.com; one starting with NET never gets an answer (000). /v1/messages (measure) logs the Bearer to $STUB_MEASURE_LOG
+#            or x@example.com; one starting with NET never gets an answer (000), one starting with NOMAIL answers 200 without an e-mail. /v1/messages (measure) logs the Bearer to $STUB_MEASURE_LOG
 #            and answers allowed at 12% (5h) and 34% (7d).
 #   claude-p plays `claude -p` refreshing the login kept for CLAUDE_SECURESTORAGE_CONFIG_DIR:
 #            a refresh token starting with DEAD fails like an expired session; any other one
@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
 done
 case "$url" in
   */api/oauth/profile)
-    case "$auth" in DEAD*|'') printf 401; exit 0 ;; NET*) printf 000; exit 0 ;; esac
+    case "$auth" in DEAD*|'') printf 401; exit 0 ;; NET*) printf 000; exit 0 ;; NOMAIL*) printf '{"account":{}}' > "${out:-/dev/null}"; printf 200; exit 0 ;; esac
     email="$(grep "^$auth " "${STUB_EMAILS:-/dev/null}" 2>/dev/null | head -1 | cut -d' ' -f2)"
     printf '{"account":{"email":"%s"}}' "${email:-x@example.com}" > "${out:-/dev/null}"
     printf 200 ;;

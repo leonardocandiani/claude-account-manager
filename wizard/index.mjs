@@ -250,7 +250,7 @@ function Home({ profiles, quotas, loading, bg, onPick }) {
     { label: 'Add an account', value: 'add' },
     { label: 'Rotation and autoswitch', value: 'rotation' },
     { label: 'Renew a token', value: 'renew' },
-    { label: 'Full login (connectors)', value: 'login' },
+    { label: 'Log in an account (browser)', value: 'login' },
     { label: 'Doctor', value: 'doctor' },
     { label: 'Sync native archive', value: 'sync' },
     { label: 'Quit', value: 'quit' },
@@ -552,7 +552,7 @@ function App() {
   if (screen === 'rotation') return h(Rotation, { profiles, onBack: goHome, onRun: (title, args) => showResult(title, run(args)) });
   // The browser login needs the real terminal, so the wizard steps aside and
   // hands it to `claude-account login` once Ink has unmounted.
-  if (screen === 'login-pick') return h(PickProfile, { title: 'full login for which profile?', profiles, filter: (p) => p.type === 'oauth_token', onBack: goHome, onPick: (n) => { loginAfterExit = n; exit(); } });
+  if (screen === 'login-pick') return h(PickProfile, { title: 'log in which account? (native: fresh login; setup-token: full login for connectors)', profiles, filter: () => true, onBack: goHome, onPick: (n) => { loginAfterExit = n; exit(); } });
   if (screen === 'busy') return h(Box, { flexDirection: 'column' }, h(Header, { subtitle: 'working' }), h(Text, { color: C.accent }, h(Spinner, { type: 'dots' }), ' talking to the Keychain...'));
   if (screen === 'result') return h(Result, { ...res, onBack: goHome });
   return null;

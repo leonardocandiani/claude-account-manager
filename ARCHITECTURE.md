@@ -226,6 +226,15 @@ the sessions on an exhausted account; with every candidate refused it stays and 
 `no_healthy_account_left`. A quarantined account is skipped going down and coming back up,
 `rotation` shows it with the reason, and a manual `use` that works or `rotation release` lifts it.
 
+On 2026-10-26 `import-native proteauto`, run without a `/login` first, copied the live slot,
+which held another account's login, into that profile and dropped its measuring token. Now an
+import proves whose login it is before copying and refuses one that belongs to another account
+or that cannot be identified (`--unverified` copies it on purpose), and a re-import keeps the
+profile's fields. A native profile is logged in again with `login <name>`, in a scratch config
+straight into its archive, so the live slot and the sessions on it are not touched; the slot gets
+the fresh login only when it still holds that profile's login (the same refresh token), and
+anything else in it is kept as the last-login archive with the slot marked as owned by no profile.
+
 **Rejected.** Refreshing through the OAuth token endpoint directly: it ties the tool to a client id
 and an endpoint that Claude Code owns and may change. Trusting `auth status`: it said yes to the
 dead login that started this.

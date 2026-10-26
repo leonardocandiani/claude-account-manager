@@ -373,5 +373,121 @@ unset STUB_LOGIN_AS
 check "first login: profile points to its dir" "$W/cfg/logins/fresh" "$(jq -r .secureStorageDir "$W/cfg/profiles/fresh.json")"
 check "first login: account from the credential" fresh@example.com "$(jq -r .account "$W/cfg/profiles/fresh.json")"
 
+# --- 26/10/2026: import-native of a login that belongs to someone else is refused. ---
+# The re-import of a profile took the live slot, which held another account's login, and
+# turned the profile into a second copy of that account.
+jq -n '{version:2,name:"stranger",type:"native_archive",keychainService:"Claude Code-credentials-stranger-archive",label:"stranger",account:"stranger@example.com"}' > "$W/cfg/profiles/stranger.json"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"A8","refreshToken":"R8","expiresAt":4102444800000},"mcpOAuth":{"srv":1}}'
+personal_before="$(kc_get 'Claude Code-credentials-personal-archive')"
+owner_before="$(cat "$W/cfg/native-owner")"
+set +e; out="$(ca import-native personal 2>&1)"; rc=$?; set -e
+check "import of another account's login over a profile: refused" 1 "$rc"
+check "import over a profile: names both accounts" 1 "$(printf '%s' "$out" | grep -c "is stranger@example.com, but profile 'personal' is me@example.com")"
+check "import over a profile: archive untouched" "$personal_before" "$(kc_get 'Claude Code-credentials-personal-archive')"
+check "import over a profile: slot owner untouched" "$owner_before" "$(cat "$W/cfg/native-owner")"
+set +e; out="$(ca import-native newone 2>&1)"; rc=$?; set -e
+check "import of a login another profile has: refused" 1 "$rc"
+check "import of a login another profile has: names that profile" 1 "$(printf '%s' "$out" | grep -c "which is profile 'stranger' already")"
+check "import of a login another profile has: no profile created" absent "$([ -f "$W/cfg/profiles/newone.json" ] && echo present || echo absent)"
+# Re-importing the right account keeps what the profile carries, its measuring token above all.
+jq '.measureKeychainService = "Claude Code OAuth Token - stranger"' "$W/cfg/profiles/stranger.json" > "$W/p.tmp" && mv "$W/p.tmp" "$W/cfg/profiles/stranger.json"
+ca import-native stranger >/dev/null
+check "re-import of the right account: measuring token kept" "Claude Code OAuth Token - stranger" "$(jq -r .measureKeychainService "$W/cfg/profiles/stranger.json")"
+check "re-import of the right account: archive holds the login" A8 "$(kc_get 'Claude Code-credentials-stranger-archive' | jq -r .claudeAiOauth.accessToken)"
+
+# --- `login` on a native profile: browser login in a scratch config, straight into its archive. ---
+live_before="$(kc_get 'Claude Code-credentials')"
+export STUB_LOGIN_AS=PN; echo "PN me@example.com" >> "$STUB_EMAILS"
+set +e; out="$(ca login personal 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_AS
+check "native login: exit 0" 0 "$rc"
+check "native login: the archive holds the fresh login" PN "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+check "native login: the live slot and its sessions untouched" "$live_before" "$(kc_get 'Claude Code-credentials')"
+check "native login: says whose login it is" 1 "$(printf '%s' "$out" | grep -c 'now holds a fresh login of me@example.com')"
+export STUB_LOGIN_AS=PX; echo "PX other2@example.com" >> "$STUB_EMAILS"
+set +e; out="$(ca login personal 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_AS
+check "native login as another account: refused" 1 "$rc"
+check "native login as another account: archive keeps the right login" PN "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+export STUB_LOGIN_FAIL=1
+set +e; ca login personal >/dev/null 2>&1; rc=$?; set -e
+unset STUB_LOGIN_FAIL
+check "native login that does not finish: refused, archive kept" "1 PN" "$rc $(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+# A dead native login points to that command, not to /login (which would move every session).
+kc_put "Claude Code-credentials-pb-archive" '{"claudeAiOauth":{"accessToken":"B9","refreshToken":"DEAD-B","expiresAt":1000}}'
+set +e; out="$(ca use pb --no-restart 2>&1)"; set -e
+check "dead native login: the fix is claude-account login" 1 "$(printf '%s' "$out" | grep -c 'fix: claude-account login pb')"
+
+# Review of 26/10: an identity that cannot be proven fails closed.
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"S9","refreshToken":"DEAD-S9","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+personal_before="$(kc_get 'Claude Code-credentials-personal-archive')"
+owner_before="$(cat "$W/cfg/native-owner")"
+set +e; out="$(ca import-native personal 2>&1)"; rc=$?; set -e
+check "import of a login nobody can identify: refused" 1 "$rc"
+check "import of a login nobody can identify: archive and owner untouched" "1 1" "$([ "$(kc_get 'Claude Code-credentials-personal-archive')" = "$personal_before" ] && echo 1 || echo 0) $([ "$(cat "$W/cfg/native-owner")" = "$owner_before" ] && echo 1 || echo 0)"
+check "import of a login nobody can identify: names the way out" 1 "$(printf '%s' "$out" | grep -c 'claude-account login personal')"
+ca import-native unknownone --unverified >/dev/null 2>&1
+check "import --unverified copies it on purpose" S9 "$(kc_get 'Claude Code-credentials-unknownone-archive' | jq -r .claudeAiOauth.accessToken)"
+rm -f "$W/cfg/profiles/unknownone.json"; echo "$owner_before" > "$W/cfg/native-owner"
+
+# login on a native profile with no recorded account: the e-mail must exist and be nobody else's.
+jq -n '{version:2,name:"blank",type:"native_archive",keychainService:"Claude Code-credentials-blank-archive",label:"blank"}' > "$W/cfg/profiles/blank.json"
+export STUB_LOGIN_AS=NOMAIL1
+set +e; out="$(ca login blank 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_AS
+check "native login without an e-mail in the answer: refused" "1 1" "$rc $(printf '%s' "$out" | grep -c 'could not tell which account signed in')"
+export STUB_LOGIN_AS=PD; echo "PD me@example.com" >> "$STUB_EMAILS"
+set +e; out="$(ca login blank 2>&1)"; rc=$?; set -e
+unset STUB_LOGIN_AS
+check "native login as an account another profile has: refused" "1 1" "$rc $(printf '%s' "$out" | grep -c "which is profile 'personal' already")"
+check "native login refused: nothing stored, no account recorded" "absent null" "$(kc_get 'Claude Code-credentials-blank-archive' >/dev/null 2>&1 && echo present || echo absent) $(jq -r '.account // null' "$W/cfg/profiles/blank.json")"
+
+# The profile that owns the live slot: the fresh login reaches the slot too, so `use` and
+# the next archiving read it instead of the dead one.
+echo personal > "$W/cfg/native-owner"; echo personal > "$W/cfg/active"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"DEADP","refreshToken":"DEAD-P","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+kc_put "Claude Code-credentials-personal-archive" '{"claudeAiOauth":{"accessToken":"DEADP","refreshToken":"DEAD-P","expiresAt":1000}}'
+export STUB_LOGIN_AS=PF; echo "PF me@example.com" >> "$STUB_EMAILS"
+ca login personal >/dev/null 2>&1
+unset STUB_LOGIN_AS
+check "owner relogs: the live slot carries the fresh login" PF "$(live .claudeAiOauth.accessToken)"
+check "owner relogs: the slot keeps its other keys" 1 "$(live .mcpOAuth.srv)"
+set +e; ca use personal --no-restart >/dev/null 2>&1; rc=$?; set -e
+check "owner relogs: use on it works now" 0 "$rc"
+ca use pb --no-restart >/dev/null 2>&1 || true
+check "owner relogs: the next archiving keeps the fresh login" PF "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+
+# The scratch login never outlives the command, even when it fails halfway.
+export TMPDIR="$W/tmp-login"; mkdir -p "$TMPDIR"
+export STUB_LOGIN_FAIL=1
+set +e; ca login personal >/dev/null 2>&1; set -e
+unset STUB_LOGIN_FAIL
+export STUB_LOGIN_AS=DEADX
+set +e; ca login personal >/dev/null 2>&1; set -e
+unset STUB_LOGIN_AS
+check "failed native logins leave no scratch dir" 0 "$(find "$TMPDIR" -maxdepth 1 -name 'claude-account-login.*' | wc -l | tr -d ' ')"
+unset TMPDIR
+
+# "-" marks a slot that no profile owns, so no profile may be named that.
+set +e; ca import-native - --unverified >/dev/null 2>&1; rc=$?; set -e
+check "a profile named '-' is refused as a usage error" 2 "$rc"
+
+# The owner relogs while the slot holds another login whose access token expired (the API
+# cannot say whose it is): that login is kept, the slot is not overwritten, and the slot
+# no longer counts as this profile's.
+echo personal > "$W/cfg/native-owner"; echo personal > "$W/cfg/active"
+kc_put "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"Q1","refreshToken":"RQ","expiresAt":1000},"mcpOAuth":{"srv":1}}'
+export STUB_LOGIN_AS=PG; echo "PG me@example.com" >> "$STUB_EMAILS"
+ca login personal >/dev/null 2>&1
+unset STUB_LOGIN_AS
+check "slot of another lineage: not overwritten" RQ "$(live .claudeAiOauth.refreshToken)"
+check "slot of another lineage: kept as the last login" RQ "$(kc_get 'Claude Code-credentials-last-login-archive' | jq -r .claudeAiOauth.refreshToken)"
+check "slot of another lineage: marked as owned by nobody" "-" "$(cat "$W/cfg/native-owner")"
+check "slot of another lineage: the archive has the fresh login" PG "$(kc_get 'Claude Code-credentials-personal-archive' | jq -r .claudeAiOauth.accessToken)"
+ca use personal --no-restart >/dev/null 2>&1
+check "then use: the sessions move onto the fresh login" PG "$(live .claudeAiOauth.accessToken)"
+check "then use: the slot is the profile's again" personal "$(cat "$W/cfg/native-owner")"
+check "then use: the other login is still kept" RQ "$(kc_get 'Claude Code-credentials-last-login-archive' | jq -r .claudeAiOauth.refreshToken)"
+
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]
