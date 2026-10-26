@@ -526,7 +526,7 @@ function UpdateClaude({ onBack, onApply }) {
     h(Header, { subtitle: 'update Claude Code' }),
     h(Text, { color: C.cream }, `installed  ${info.installed}   (claude-stable ${info.stable})`),
     h(Text, { color: behind ? C.warn : C.ok }, `latest     ${info.latest}`),
-    h(Text, { color: C.muted }, n ? `${n} background session${n === 1 ? '' : 's'}: the daemon restarts itself and adopts them, same ids` : 'no background sessions'),
+    h(Text, { color: C.muted }, n ? `${n} background session${n === 1 ? '' : 's'}: restarted on the new version with the same ids, Orca too, as a switch does` : 'no background sessions'),
     h(Box, { marginTop: 1 }, h(Menu, { items: [
       ...(behind ? [{ label: `Update to ${info.latest} now`, value: 'apply' }]
         : staleCopy ? [{ label: `Refresh claude-stable to ${info.installed}`, value: 'refresh' }] : []),

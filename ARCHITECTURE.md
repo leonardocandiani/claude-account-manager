@@ -252,5 +252,11 @@ dead=0`, and the adopted workers stay on the old version until they go idle. The
 that `bg adopt:` line from `daemon.log` and fails when a session died. A failed install changes
 nothing, `claude-stable` included.
 
+Adopted sessions keep running the binary they started with, so after the adoption the update
+restarts them the way a switch of account does (`bg-restart --force`: same ids, a busy one comes
+back with the wake prompt) and restarts Orca, and everything runs the new version at once.
+`--no-restart` leaves them on the old version until they go idle. When a session died in the
+handover, nothing is restarted on top of it.
+
 **Rejected.** Turning the auto-updater back on: it would restart the daemon at an hour nobody
 chose, under the sessions running at that moment.

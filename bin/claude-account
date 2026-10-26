@@ -1658,15 +1658,17 @@ wait_daemon_adoption() {
 }
 
 cmd_update() {
-  local apply=0 target="" installed stable latest real sessions n from
+  local apply=0 restart=true target="" installed stable latest real sessions n from
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --apply) apply=1 ;;
+      --no-restart) restart=false ;;
       -*) usage_error "update: unknown option $1" ;;
       *) [ -z "$target" ] || usage_error "update: one version at most"; target="$1" ;;
     esac
     shift
   done
+  [ "$restart" = true ] || [ "$apply" -eq 1 ] || usage_error "update: --no-restart goes with --apply"
   [ -z "$target" ] || [ "$apply" -eq 1 ] || usage_error "update: a version goes with --apply (claude-account update --apply $target)"
   case "$target" in ''|[0-9]*.[0-9]*.[0-9]*) ;; *) usage_error "update: '$target' is not a version (like 2.1.310)" ;; esac
   installed="$(installed_version)" || die "update: $INSTALL_ROOT/bin/claude is not the native installer's link; update it the way it was installed"
@@ -1700,8 +1702,26 @@ cmd_update() {
   fi
   sync_stable || die "update: $target installed, but claude-stable could not be replaced (still $stable); the shell copies it on its next start"
   printf 'installed: %s (was %s)\nstable: %s\n' "$target" "$installed" "$(stable_version)"
-  [ "$n" -gt 0 ] && [ "$(stable_version)" != none ] || { printf 'daemon: no background sessions to adopt\n'; return 0; }
-  wait_daemon_adoption "${from:-0}"
+  if [ "$n" -gt 0 ] && [ "$(stable_version)" != none ]; then
+    wait_daemon_adoption "${from:-0}" || return 1
+  else
+    printf 'daemon: no background sessions to adopt\n'
+  fi
+  update_restart "$restart"
+}
+
+# The adopted sessions keep running the binary they started with. Like a switch of
+# account, the update then restarts every one of them (same ids, a busy one comes back
+# with the wake prompt) and Orca, so all of it runs the new version now.
+update_restart() {
+  if [ "$1" != true ]; then
+    note "--no-restart: open sessions keep the old version until they restart or go idle"
+    return 0
+  fi
+  local rc=0
+  ( cmd_bg_restart --force ) || { rc=1; note "the background sessions were not restarted; now: claude-account bg-restart --force"; }
+  schedule_orca_restart
+  return "$rc"
 }
 
 usage() {
@@ -1738,9 +1758,11 @@ Usage:
   claude-account measure [name...]                  rate-limit state per profile (headers, no secrets)
   claude-account exec [args...]                     run the native binary under the active profile
   claude-account regime [--json|livre|economia|auto] what the quota allows right now (see claude-account-regime --help)
-  claude-account update [--apply [version]]         Claude Code: installed, latest, sessions; --apply installs
-                                                    it, refreshes claude-stable and waits for the daemon to
-                                                    adopt the background sessions
+  claude-account update [--apply [version] [--no-restart]]
+                                                    Claude Code: installed, latest, sessions; --apply installs
+                                                    it, refreshes claude-stable, waits for the daemon to adopt
+                                                    the background sessions, then restarts them (same ids) and
+                                                    Orca on the new version, as a switch does
 
 Exit codes: 0 ok, 1 error, 2 usage error.
 Override the native binary path with CLAUDE_NATIVE_BIN=/path/to/claude.
