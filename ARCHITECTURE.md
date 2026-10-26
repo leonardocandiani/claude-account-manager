@@ -238,3 +238,19 @@ anything else in it is kept as the last-login archive with the slot marked as ow
 **Rejected.** Refreshing through the OAuth token endpoint directly: it ties the tool to a client id
 and an endpoint that Claude Code owns and may change. Trusting `auth status`: it said yes to the
 dead login that started this.
+
+## ADR-009: updating Claude Code goes through the daemon's own handover
+
+`update --apply` runs the native installer (`claude install <version>`, which works with
+`DISABLE_AUTOUPDATER` set), checks that the `claude` link points at the new version, and then
+replaces `claude-stable`, the signed copy at a fixed path that keeps the macOS permission grants
+across versions. The copy is signed in a temp file and renamed over the old one: rewriting the
+file in place gets the daemon and its workers killed (Code Signature Invalid) on the next page-in.
+The daemon runs from `claude-stable`, notices the new file, restarts itself and adopts the
+running sessions; the 2.1.299 to 2.1.301 update on 2026-10-16 logged `adopted=19 respawned=0
+dead=0`, and the adopted workers stay on the old version until they go idle. The command reads
+that `bg adopt:` line from `daemon.log` and fails when a session died. A failed install changes
+nothing, `claude-stable` included.
+
+**Rejected.** Turning the auto-updater back on: it would restart the daemon at an hour nobody
+chose, under the sessions running at that moment.

@@ -125,6 +125,7 @@ claude-account use personal
 | 🚦 | `regime [--json]` | one word saying what the quota allows right now |
 | ▶️ | `exec [args...]` | run the native binary under the active profile (what the wrapper does) |
 |  | `login <name>` | browser login: for an OAuth profile, a full login in its own Keychain item (claude.ai connectors); for a native profile, a fresh login straight into its archive, without touching the live slot or the sessions on it |
+|  | `update [--apply [version]]` | Claude Code: installed, latest and the background sessions; `--apply` installs it with the native installer, replaces `claude-stable` by an atomic rename and waits for the daemon to adopt the sessions (same ids) |
 |  | `bg-restart [--force]` | move background sessions to the active profile, same ids (deferred while one is busy) |
 |  | `bg-status` | active profile vs the daemon's, background sessions, pending move |
 

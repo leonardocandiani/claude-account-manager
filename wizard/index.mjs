@@ -253,6 +253,7 @@ function Home({ profiles, quotas, loading, bg, onPick }) {
     { label: 'Log in an account (browser)', value: 'login' },
     { label: 'Doctor', value: 'doctor' },
     { label: 'Sync native archive', value: 'sync' },
+    { label: 'Update Claude Code', value: 'update' },
     { label: 'Quit', value: 'quit' },
   ];
   return h(Box, { flexDirection: 'column' },
@@ -507,6 +508,33 @@ function Rotation({ profiles, onBack, onRun }) {
     h(Hint, null, '↑↓ move · Enter select · Esc back'));
 }
 
+function UpdateClaude({ onBack, onApply }) {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    run(['update']).then((r) => {
+      const kv = Object.fromEntries(r.stdout.split('\n').map((l) => l.match(/^(\w+): (.*)$/)).filter(Boolean).map((m) => [m[1], m[2]]));
+      setInfo({ ...kv, ok: r.code === 0, error: r.code === 0 ? null : stripAnsi(r.stdout + r.stderr).trim() });
+    });
+  }, []);
+  useInput((_, key) => { if (key.escape) onBack(); });
+  if (!info) return h(Box, { flexDirection: 'column' }, h(Header, { subtitle: 'update Claude Code' }), h(Text, { color: C.accent }, h(Spinner, { type: 'dots' }), ' checking the versions...'));
+  if (!info.ok) return h(Box, { flexDirection: 'column' }, h(Header, { subtitle: 'update Claude Code' }), h(Text, { color: C.fail }, info.error), h(Hint, null, 'Esc back'));
+  const staleCopy = info.stable && info.stable !== 'none' && info.stable !== info.installed;
+  const behind = /^\d/.test(info.latest || '') && info.latest !== info.installed;
+  const n = Number(info.background_sessions || 0);
+  return h(Box, { flexDirection: 'column' },
+    h(Header, { subtitle: 'update Claude Code' }),
+    h(Text, { color: C.cream }, `installed  ${info.installed}   (claude-stable ${info.stable})`),
+    h(Text, { color: behind ? C.warn : C.ok }, `latest     ${info.latest}`),
+    h(Text, { color: C.muted }, n ? `${n} background session${n === 1 ? '' : 's'}: the daemon restarts itself and adopts them, same ids` : 'no background sessions'),
+    h(Box, { marginTop: 1 }, h(Menu, { items: [
+      ...(behind ? [{ label: `Update to ${info.latest} now`, value: 'apply' }]
+        : staleCopy ? [{ label: `Refresh claude-stable to ${info.installed}`, value: 'refresh' }] : []),
+      { label: behind || staleCopy ? 'Back' : 'Up to date. Back', value: 'back' },
+    ], onSelect: (i) => (i.value === 'apply' ? onApply(info.latest) : i.value === 'refresh' ? onApply(info.installed) : onBack()) })),
+    h(Hint, null, '↑↓ move · Enter select · Esc back'));
+}
+
 function App() {
   const { exit } = useApp();
   const [screen, setScreen] = useState('home');
@@ -544,6 +572,7 @@ function App() {
     else if (v === 'login') setScreen('login-pick');
     else if (v === 'sync') showResult('sync native archive', run(['sync-archive']));
     else if (v === 'doctor') showResult('doctor', run(['doctor']));
+    else if (v === 'update') setScreen('update');
   } });
   if (screen === 'switch') return h(PickProfile, { title: 'switch to which account?', profiles, filter: (p) => !p.active, onBack: goHome, onPick: (n) => showResult(`switch to ${n}`, run(['use', n])) });
   if (screen === 'renew-pick') return h(PickProfile, { title: 'renew the token of which profile?', profiles, filter: (p) => p.measurable, onBack: goHome, onPick: (n) => { setPicked(profiles.find((p) => p.name === n)); setScreen('renew'); } });
@@ -553,6 +582,7 @@ function App() {
   // The browser login needs the real terminal, so the wizard steps aside and
   // hands it to `claude-account login` once Ink has unmounted.
   if (screen === 'login-pick') return h(PickProfile, { title: 'log in which account? (native: fresh login; setup-token: full login for connectors)', profiles, filter: () => true, onBack: goHome, onPick: (n) => { loginAfterExit = n; exit(); } });
+  if (screen === 'update') return h(UpdateClaude, { onBack: goHome, onApply: (ver) => showResult(`update Claude Code to ${ver}`, run(['update', '--apply', ver])) });
   if (screen === 'busy') return h(Box, { flexDirection: 'column' }, h(Header, { subtitle: 'working' }), h(Text, { color: C.accent }, h(Spinner, { type: 'dots' }), ' talking to the Keychain...'));
   if (screen === 'result') return h(Result, { ...res, onBack: goHome });
   return null;

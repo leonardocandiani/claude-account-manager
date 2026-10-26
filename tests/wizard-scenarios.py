@@ -29,6 +29,7 @@ exit 0
 ''', 0o755)
 write(f'{S}/launchctl', '#!/usr/bin/env bash\nexit 0\n', 0o755)
 write(f'{S}/curl', r'''#!/usr/bin/env bash
+case "$*" in *file://*) exec /usr/bin/curl "$@" ;; esac
 hdr=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && hdr="$2"; shift; done
 printf 'anthropic-ratelimit-unified-5h-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: 0.12\r\nanthropic-ratelimit-unified-7d-status: allowed\r\nanthropic-ratelimit-unified-7d-utilization: 0.34\r\n' > "$hdr"
 printf 200
@@ -54,8 +55,16 @@ os.symlink(DEPS, f'{W}/node_modules')
 # HOME is a temp dir too: `use` must never find the real Orca restart helper.
 FAKE_HOME = os.path.join(T, 'home')
 os.makedirs(FAKE_HOME)
+# A native install at 2.1.301 with 2.1.310 published, for the update screen.
+INST = os.path.join(T, 'install')
+os.makedirs(f'{INST}/share/claude/versions')
+write(f'{INST}/share/claude/versions/2.1.301', '#!/bin/sh\n', 0o755)
+os.makedirs(f'{INST}/bin')
+os.symlink(f'{INST}/share/claude/versions/2.1.301', f'{INST}/bin/claude')
+write(f'{T}/latest.json', '{"version":"2.1.310"}')
 env = dict(os.environ, HOME=FAKE_HOME, PATH=f'{S}:{os.environ["PATH"]}', CLAUDE_ACCOUNT_HOME=H,
            CLAUDE_ACCOUNT_BIN=f'{ROOT}/bin/claude-account', CLAUDE_NATIVE_BIN=f'{S}/claude',
+           CLAUDE_INSTALL_ROOT=INST, CLAUDE_ACCOUNT_UPDATE_REGISTRY=f'file://{T}/latest.json',
            TERM='xterm-256color', COLUMNS='120', LINES='60', NO_COLOR='1', FORCE_COLOR='0')
 pid, fd = pty.fork()
 if pid == 0:
@@ -145,6 +154,14 @@ check('rotation: autoswitch turned off', read_until(r'autoswitch: off'))
 check('rotation: kill switch written', os.path.exists(f'{H}/autoswitch.off'))
 send('\r', 1.5)
 check('home shows the autoswitch off', read_until(r'autoswitch\s+off'))
+
+screen = ''
+send(DOWN * 7 + '\r', 1.5)  # Switch, Add, Rotation, Renew, Log in, Doctor, Sync, Update
+check('update: shows the installed and the latest version', read_until(r'installed\s+2\.1\.301[\s\S]*latest\s+2\.1\.310'))
+check('update: offers the update, nothing installed yet', read_until(r'Update to 2\.1\.310 now') and os.readlink(f'{INST}/bin/claude').endswith('2.1.301'))
+screen = ''
+os.write(fd, b'\x1b'); pump(1.0)
+check('update: Esc goes back home', read_until(r'What do you want to do'))
 
 os.kill(pid, 9)
 shutil.rmtree(T, ignore_errors=True)
