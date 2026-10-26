@@ -30,6 +30,10 @@ esac
 EOF
 chmod +x "$W/claude-stub"
 printf '#!/bin/sh\nexit 0\n' > "$S/codesign"; chmod +x "$S/codesign"
+# The restart after an update must never reach the real Keychain or launchd.
+printf '#!/bin/sh\nexit 44\n' > "$S/security"; printf '#!/bin/sh\nexit 0\n' > "$S/launchctl"; chmod +x "$S/security" "$S/launchctl"
+jq -n '{version:2,name:"nat",type:"native_archive",keychainService:"x-archive",label:"nat"}' > "$W/cfg/profiles/nat.json"
+echo nat > "$W/cfg/active"
 cp "$W/claude-stub" "$R/share/claude/versions/2.1.301"
 ln -sfn "$R/share/claude/versions/2.1.301" "$R/bin/claude"
 cp "$W/claude-stub" "$R/bin/claude-stable"
@@ -64,7 +68,7 @@ check "check: installs nothing" 0 "$(wc -l < "$STUB_LOG" | tr -d ' ')"
 
 old_inode="$(inode)"
 fake_daemon 0
-set +e; out="$(ca update --apply)"; rc=$?; set -e; wait
+set +e; out="$(ca update --no-restart --apply)"; rc=$?; set -e; wait
 check "apply: exit 0" 0 "$rc"
 check "apply: the installer ran for the latest" "install 2.1.310" "$(tail -1 "$STUB_LOG")"
 check "apply: claude points at the new version" "$R/share/claude/versions/2.1.310" "$(readlink "$R/bin/claude")"
@@ -74,24 +78,24 @@ check "apply: the stable marker follows" "$R/share/claude/versions/2.1.310" "$(c
 check "apply: no temp copy left" 0 "$(find "$R/bin" -name '.claude-stable.tmp.*' | wc -l | tr -d ' ')"
 check "apply: reports the adoption" 1 "$(printf '%s\n' "$out" | grep -c 'daemon: restarted, adopted=2 respawned=0 dead=0')"
 
-set +e; out="$(ca update --apply)"; rc=$?; set -e
+set +e; out="$(ca update --no-restart --apply)"; rc=$?; set -e
 check "apply when current: no-op, exit 0" "0 1" "$rc $(printf '%s\n' "$out" | grep -c 'unchanged')"
 check "apply when current: the installer does not run" 1 "$(wc -l < "$STUB_LOG" | tr -d ' ')"
 
 fake_daemon 0
-set +e; ca update --apply 2.1.301 >/dev/null 2>&1; rc=$?; set -e; wait
+set +e; ca update --no-restart --apply 2.1.301 >/dev/null 2>&1; rc=$?; set -e; wait
 check "apply of a named version (rollback)" "0 $R/share/claude/versions/2.1.301" "$rc $(readlink "$R/bin/claude")"
 
 stable_before="$(inode)"
-set +e; out="$(env STUB_INSTALL_FAIL=1 "${envs[@]}" "$CA" update --apply 2.1.310 2>&1)"; rc=$?; set -e
+set +e; out="$(env STUB_INSTALL_FAIL=1 "${envs[@]}" "$CA" update --no-restart --apply 2.1.310 2>&1)"; rc=$?; set -e
 check "installer fails: exit 1 and says so" "1 1" "$rc $(printf '%s\n' "$out" | grep -c "'claude install 2.1.310' failed")"
 check "installer fails: claude and claude-stable untouched" "$R/share/claude/versions/2.1.301 $stable_before" "$(readlink "$R/bin/claude") $(inode)"
 
 fake_daemon 1
-set +e; out="$(ca update --apply 2.1.310)"; rc=$?; set -e; wait
+set +e; out="$(ca update --no-restart --apply 2.1.310)"; rc=$?; set -e; wait
 check "a session died in the handover: exit 1 and points at claude-sessions" "1 1" "$rc $(printf '%s\n' "$out" | grep -c 'help: claude-sessions')"
 
-set +e; out="$(env "${envs[@]}" CLAUDE_ACCOUNT_UPDATE_WAIT=1 "$CA" update --apply 2.1.301)"; rc=$?; set -e
+set +e; out="$(env "${envs[@]}" CLAUDE_ACCOUNT_UPDATE_WAIT=1 "$CA" update --no-restart --apply 2.1.301)"; rc=$?; set -e
 check "sessions running and no adoption reported: exit 1" "1 1" "$rc $(printf '%s\n' "$out" | grep -c 'no adoption of the sessions reported')"
 
 # The log was rotated after the offset was taken: the adoption line is still found.
@@ -99,27 +103,41 @@ check "sessions running and no adoption reported: exit 1" "1 1" "$rc $(printf '%
 before="$(inode)"
 ( while [ "$(inode)" = "$before" ]; do sleep 0.1; done
   : > "$DLOG"; printf '[t] [bg] bg adopt: adopted=2 respawned=0 dead=0\n' >> "$DLOG" ) &
-set +e; out="$(ca update --apply 2.1.310)"; rc=$?; set -e; wait
+set +e; out="$(ca update --no-restart --apply 2.1.310)"; rc=$?; set -e; wait
 check "daemon log rotated mid-update: the adoption is still read" "0 1" "$rc $(printf '%s\n' "$out" | grep -c 'adopted=2')"
 
 # Re-signing fails: the unsigned copy never replaces claude-stable.
 printf '#!/bin/sh\ncase "$1" in --remove-signature) exit 0 ;; esac\nexit 1\n' > "$S/codesign"
 stable_before="$(inode)"
-set +e; out="$(ca update --apply 2.1.301 2>&1)"; rc=$?; set -e
+set +e; out="$(ca update --no-restart --apply 2.1.301 2>&1)"; rc=$?; set -e
 check "re-signing fails: exit 1, claude-stable untouched" "1 $stable_before" "$rc $(inode)"
 check "re-signing fails: no temp copy left" 0 "$(find "$R/bin" -name '.claude-stable.tmp.*' | wc -l | tr -d ' ')"
 check "re-signing fails: the check says claude-stable is behind" 1 "$(ca update | grep -c 'claude-stable is behind')"
 printf '#!/bin/sh\nexit 0\n' > "$S/codesign"
 fake_daemon 0
-set +e; ca update --apply 2.1.301 >/dev/null 2>&1; rc=$?; set -e; wait
+set +e; ca update --no-restart --apply 2.1.301 >/dev/null 2>&1; rc=$?; set -e; wait
 check "then --apply with the version installed refreshes claude-stable" "0 2.1.301" "$rc $(basename "$(cat "$R/share/claude/.stable-src")")"
 
+# Default --apply: after the adoption, every session restarts on the new version, as a switch does.
+fake_daemon 0
+set +e; out="$(ca update --apply 2.1.310)"; rc=$?; set -e; wait
+check "apply restarts the sessions after the adoption" "0 1" "$rc $(printf '%s\n' "$out" | grep -c 'bg-restart: moving 2 background session')"
+check "apply restart: snapshot of the sessions taken" 2 "$(jq length "$W/cfg/bg-restart.json" 2>/dev/null || echo 0)"
+check "apply restart: says how to restart the terminals when Orca is absent" 1 "$(printf '%s\n' "$out" | grep -c 'restart your terminal sessions')"
+rm -f "$W/cfg/bg-restart.json"
+fake_daemon 1
+set +e; out="$(ca update --apply 2.1.301)"; rc=$?; set -e; wait
+check "a session died: no restart on top of it" "1 0" "$rc $(printf '%s\n' "$out" | grep -c 'bg-restart: moving')"
+set +e; ca update --no-restart >/dev/null 2>&1; rc=$?; set -e
+check "--no-restart without --apply: usage error" 2 "$rc"
+check "--no-restart leaves them running" 1 "$(ca update --no-restart --apply 2.1.301 | grep -c 'unchanged')"
+
 echo '{}' > "$W/latest.json"
-set +e; out="$(ca update --apply 2>&1)"; rc=$?; set -e
+set +e; out="$(ca update --no-restart --apply 2>&1)"; rc=$?; set -e
 check "registry without an answer: --apply asks for the version" "1 1" "$rc $(printf '%s\n' "$out" | grep -c 'name the version')"
 check "registry without an answer: the check still works" "0 1" "$(ca update >/dev/null 2>&1; echo $?) $(ca update | grep -c 'latest: unknown')"
 
-set +e; ca update 2.1.310 >/dev/null 2>&1; rc1=$?; ca update --apply x.y >/dev/null 2>&1; rc2=$?; ca update --now >/dev/null 2>&1; rc3=$?; set -e
+set +e; ca update 2.1.310 >/dev/null 2>&1; rc1=$?; ca update --no-restart --apply x.y >/dev/null 2>&1; rc2=$?; ca update --now >/dev/null 2>&1; rc3=$?; set -e
 check "usage errors exit 2" "2 2 2" "$rc1 $rc2 $rc3"
 
 rm "$R/bin/claude"; cp "$W/claude-stub" "$R/bin/claude"

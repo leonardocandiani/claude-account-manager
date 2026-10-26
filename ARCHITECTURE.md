@@ -194,7 +194,7 @@ restart-orca.sh` skips the daemon, background sessions and in-flight `--bg` clie
 colour, mode, stop), always on the active profile, so nothing needs to start the daemon with a
 bare `claude --bg` from an environment that may hold another account.
 
-## ADR-009: updating Claude Code goes through the daemon's own handover
+## ADR-008: updating Claude Code goes through the daemon's own handover
 
 `update --apply` runs the native installer (`claude install <version>`, which works with
 `DISABLE_AUTOUPDATER` set), checks that the `claude` link points at the new version, and then
@@ -206,6 +206,12 @@ running sessions; the 2.1.299 to 2.1.301 update on 2026-10-16 logged `adopted=19
 dead=0`, and the adopted workers stay on the old version until they go idle. The command reads
 that `bg adopt:` line from `daemon.log` and fails when a session died. A failed install changes
 nothing, `claude-stable` included.
+
+Adopted sessions keep running the binary they started with, so after the adoption the update
+restarts them the way a switch of account does (`bg-restart --force`: same ids, a busy one comes
+back with the wake prompt) and restarts Orca, and everything runs the new version at once.
+`--no-restart` leaves them on the old version until they go idle. When a session died in the
+handover, nothing is restarted on top of it.
 
 **Rejected.** Turning the auto-updater back on: it would restart the daemon at an hour nobody
 chose, under the sessions running at that moment.
