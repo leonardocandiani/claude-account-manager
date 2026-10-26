@@ -193,3 +193,19 @@ restart-orca.sh` skips the daemon, background sessions and in-flight `--bg` clie
 `claude-sessions` exposes the same mechanics one session at a time (create, resume, rename,
 colour, mode, stop), always on the active profile, so nothing needs to start the daemon with a
 bare `claude --bg` from an environment that may hold another account.
+
+## ADR-009: updating Claude Code goes through the daemon's own handover
+
+`update --apply` runs the native installer (`claude install <version>`, which works with
+`DISABLE_AUTOUPDATER` set), checks that the `claude` link points at the new version, and then
+replaces `claude-stable`, the signed copy at a fixed path that keeps the macOS permission grants
+across versions. The copy is signed in a temp file and renamed over the old one: rewriting the
+file in place gets the daemon and its workers killed (Code Signature Invalid) on the next page-in.
+The daemon runs from `claude-stable`, notices the new file, restarts itself and adopts the
+running sessions; the 2.1.299 to 2.1.301 update on 2026-10-16 logged `adopted=19 respawned=0
+dead=0`, and the adopted workers stay on the old version until they go idle. The command reads
+that `bg adopt:` line from `daemon.log` and fails when a session died. A failed install changes
+nothing, `claude-stable` included.
+
+**Rejected.** Turning the auto-updater back on: it would restart the daemon at an hour nobody
+chose, under the sessions running at that moment.
