@@ -1578,6 +1578,15 @@ regime_effort_args() {
   for a in "$@"; do
     case "$a" in --) break ;; --effort|--effort=*) return ;; esac
   done
+  # A folder that sets its own effortLevel wins: a background session keeps the flag in
+  # its respawnFlags for good, and the flag beats settings (29/10/2026: the Centrais set
+  # low and their sessions came back at medium on every respawn).
+  local d f
+  for d in "$PWD" "$(git rev-parse --show-toplevel 2>/dev/null)"; do
+    for f in "$d/.claude/settings.local.json" "$d/.claude/settings.json"; do
+      [ -n "$d" ] && jq -e '.effortLevel // empty' "$f" >/dev/null 2>&1 && return
+    done
+  done
   local bin r
   bin="$(dirname "$0")/claude-account-regime"
   [ -x "$bin" ] || return

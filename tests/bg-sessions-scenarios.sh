@@ -152,6 +152,19 @@ check "exec --bg from a session: the daemon starts clean" "$clean" "$(env "${env
 check "exec agents from a session: clean" "$clean" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec agents)"
 check "exec respawn from a session: clean" "$clean" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec respawn abc)"
 check "exec of a foreground session keeps the caller's variables" "effort=xhigh job=/j pid=9 orca=p" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec -p hi)"
+# 29/10/2026: in economy the regime added --effort medium, which a background session keeps
+# in its respawnFlags, over the effortLevel low its folder sets.
+mkdir -p "$W/rbin" "$W/proj-low/.claude" "$W/proj-none" "$W/proj-shared/.claude"
+cp "$CA" "$W/rbin/claude-account"
+printf '#!/bin/sh\necho %s\n' "'{\"regime\":\"economia\"}'" > "$W/rbin/claude-account-regime"
+printf '#!/bin/sh\necho "args=$*"\n' > "$W/native-args"
+chmod +x "$W/rbin/claude-account" "$W/rbin/claude-account-regime" "$W/native-args"
+echo '{"effortLevel":"low"}' > "$W/proj-low/.claude/settings.local.json"
+echo '{"effortLevel":"low"}' > "$W/proj-shared/.claude/settings.json"
+rx() { (cd "$1" && env "${envs[@]}" CLAUDE_NATIVE_BIN="$W/native-args" "$W/rbin/claude-account" exec --bg go 2>/dev/null); }
+check "economy, folder without effortLevel: --effort medium added" "args=--effort medium --bg go" "$(rx "$W/proj-none")"
+check "economy, folder with effortLevel in settings.local.json: no --effort" "args=--bg go" "$(rx "$W/proj-low")"
+check "economy, folder with effortLevel in settings.json: no --effort" "args=--bg go" "$(rx "$W/proj-shared")"
 
 # Login shells (lib/shell-init.zsh) follow the same rule as `exec`.
 shell_env() { env HOME="$W/home" CLAUDE_ACCOUNT_HOME="$W/cfg" PATH="$S:$PATH" zsh -fc "source '$here/../lib/shell-init.zsh'; printenv $1 || true"; }
