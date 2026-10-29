@@ -10,9 +10,10 @@ import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import { spawn, execFile } from 'node:child_process';
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const h = React.createElement;
 
@@ -38,12 +39,68 @@ function readText(p) {
   try { return readFileSync(p, 'utf8').trim(); } catch { return ''; }
 }
 
+function loadPolicy() {
+  try { return JSON.parse(readFileSync(join(HOME, 'policy.json'), 'utf8')); } catch { return {}; }
+}
+
 // The autoswitch chain: preferred, fallback, then the reserves.
 function loadChain() {
+  const p = loadPolicy();
+  return [p.preferred, p.fallback, ...(p.reserves || [])].filter(Boolean);
+}
+
+function loadQuarantine() {
   try {
-    const p = JSON.parse(readFileSync(join(HOME, 'policy.json'), 'utf8'));
-    return [p.preferred, p.fallback, ...(p.reserves || [])].filter(Boolean);
-  } catch { return []; }
+    const q = JSON.parse(readFileSync(join(HOME, 'autoswitch-quarantine.json'), 'utf8'));
+    const now = Date.now() / 1000;
+    return new Set(Object.keys(q).filter((n) => Number(q[n]?.until) > now));
+  } catch { return new Set(); }
+}
+
+// The same decision as bin/claude-account-autoswitch (tier, reset_order, best_target,
+// up_target): the account whose weekly quota resets first is used first, and each keeps its
+// floor until the last release_hours before its reset. Tier 0: room above the floor worth a
+// switch; 1: room above the floor; 2: only the floor left; 9: nothing under exhausted_at, or
+// no reading. `pick` is where the autoswitch would go now and `why` the reason.
+export function planOf(chain, quotas, policy, { active = null, lastTo = null, out = loadQuarantine(), now = Date.now() / 1000 } = {}) {
+  const t5 = policy.exhausted_at?.five_hour ?? 0.95;
+  const t7 = policy.exhausted_at?.seven_day ?? 0.97;
+  const b5 = policy.return_below?.five_hour ?? 0.70;
+  const b7 = policy.return_below?.seven_day ?? 0.90;
+  const fl = policy.floor?.seven_day ?? 0.10;
+  const flh = policy.floor?.release_hours ?? 24;
+  const tier = (q) => {
+    if (!q || q.status !== 'allowed' || q.f5 >= t5 || q.f7 >= t7) return 9;
+    const room = t7 - (q.r7 && q.r7 - now <= flh * 3600 ? 0 : fl) - q.f7;
+    return room >= t7 - b7 - 1e-9 ? 0 : room > 1e-9 ? 1 : 2;
+  };
+  const order = chain.map((n, i) => ({ n, i, r: quotas[n]?.r7 || Infinity }))
+    .sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.n);
+  const tiers = Object.fromEntries(chain.map((n) => [n, tier(quotas[n])]));
+  const plan = { order, tiers, pick: null, why: null, t5, floorPct: Math.round(fl * 100), releaseHours: flh };
+  const cur = active || chain[0];
+  if (!cur || !chain.includes(cur) || !['allowed', 'rejected'].includes(quotas[cur]?.status)) return plan;
+  const at = tiers[cur];
+  const best = order.filter((n) => n !== cur && !out.has(n)).reduce((b, n) => (tiers[n] < (b ? tiers[b] : 9) ? n : b), null);
+  const down = best && tiers[best] < at ? best : null;
+  plan.pick = cur; plan.why = at <= 1 ? 'room' : at === 2 ? 'all_at_floor' : 'none_left';
+  if (active && lastTo && active !== lastTo) {
+    if (at <= 1) plan.why = 'manual';
+    else if (down) { plan.pick = down; plan.why = at === 2 ? 'at_floor' : 'full'; }
+    return plan;
+  }
+  const up = order.slice(0, order.indexOf(cur)).find((n) => !out.has(n) && tiers[n] === 0 && quotas[n].f5 < b5);
+  if (up) { plan.pick = up; plan.why = (quotas[up].r7 || Infinity) < (quotas[cur].r7 || Infinity) ? 'resets_sooner' : 'first_in_rotation'; }
+  else if (at > 1 && down) { plan.pick = down; plan.why = at === 2 ? 'at_floor' : 'full'; }
+  return plan;
+}
+
+// Time left until a reset, short: 47m, 1h49, 1d16h.
+function until(epoch, now = Date.now() / 1000) {
+  if (!epoch) return '';
+  const m = Math.max(0, Math.round((epoch - now) / 60));
+  const d = Math.floor(m / 1440), hh = Math.floor((m % 1440) / 60), mm = m % 60;
+  return d ? `${d}d${hh}h` : hh ? `${hh}h${String(mm).padStart(2, '0')}` : `${mm}m`;
 }
 
 function loadProfiles() {
@@ -58,7 +115,7 @@ function loadProfiles() {
     .map((f) => {
       const p = JSON.parse(readFileSync(join(dir, f), 'utf8'));
       const email = p.account || (p.label || '').match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/)?.[0] || '';
-      return { name: p.name, type: p.type, email, full: !!p.secureStorageDir, rank: chain.indexOf(p.name) + 1, active: p.name === active, owner: p.name === owner, measurable: p.type === 'oauth_token' || !!p.measureKeychainService };
+      return { name: p.name, type: p.type, email, full: !!p.secureStorageDir, active: p.name === active, owner: p.name === owner, measurable: p.type === 'oauth_token' || !!p.measureKeychainService };
     })
     .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
 }
@@ -95,8 +152,12 @@ function parseMeasure(stdout) {
   for (const line of stdout.split('\n')) {
     const m = line.trim();
     if (!m || m.startsWith('profiles[')) continue;
-    const [name, status, http, u5, , u7, , overage] = m.split(',');
-    out[name] = { status, http, u5: u5 ? Math.round(parseFloat(u5) * 100) : null, u7: u7 ? Math.round(parseFloat(u7) * 100) : null, overage };
+    const [name, status, http, u5, r5, u7, r7, overage] = m.split(',');
+    out[name] = {
+      status, http, overage,
+      u5: u5 ? Math.round(parseFloat(u5) * 100) : null, u7: u7 ? Math.round(parseFloat(u7) * 100) : null,
+      f5: parseFloat(u5) || 0, f7: parseFloat(u7) || 0, r5: Number(r5) || null, r7: Number(r7) || null,
+    };
   }
   return out;
 }
@@ -191,23 +252,31 @@ function Bar({ pct, width = 16 }) {
   return h(Text, null, h(Text, { color }, '█'.repeat(filled)), h(Text, { color: C.badgeBg }, '█'.repeat(width - filled)), h(Text, { color: C.muted }, ` ${String(pct).padStart(3)}%`));
 }
 
+// ↻ and the time until that window resets.
+const Reset = ({ at }) => h(Text, { color: C.muted }, (at ? ` ↻${until(at)}` : '').padEnd(8));
+
 function QuotaLine({ q }) {
-  return h(Box, null, h(Text, { color: C.muted }, '5h  '), h(Bar, { pct: q?.u5 }), h(Text, { color: C.muted }, '   7d  '), h(Bar, { pct: q?.u7 }));
+  return h(Box, null, h(Text, { color: C.muted }, '5h  '), h(Bar, { pct: q?.u5 }), h(Reset, { at: q?.r5 }), h(Text, { color: C.muted }, '  7d  '), h(Bar, { pct: q?.u7 }), h(Reset, { at: q?.r7 }));
 }
 
-function ProfileRow({ p, q, loading, pad = 16 }) {
+// The window that holds an account back: the five-hour one when it is full, else the week.
+const backIn = (q, t5) => until(q.f5 >= t5 && q.r5 ? q.r5 : q.r7);
+
+function ProfileRow({ p, q, tier, rank, t5, loading, pad = 16 }) {
   const mark = p.active ? h(Text, { color: C.accent, bold: true }, '● ') : h(Text, { color: C.muted }, '○ ');
   const kind = p.type === 'native_archive' ? 'native login' : p.full ? 'full login' : 'setup-token';
-  const rank = h(Text, { color: p.rank === 1 ? C.accent : p.rank === 2 ? C.warn : C.muted, bold: true }, (RANK[p.rank] || ' ') + ' ');
+  const num = h(Text, { color: rank === 1 ? C.accent : rank === 2 ? C.warn : C.muted, bold: true }, (RANK[rank] || ' ') + ' ');
   const status = loading
     ? h(Text, { color: C.muted }, h(Spinner, { type: 'dots' }), ' measuring')
     : !q ? h(Text, { color: C.muted }, 'not measured')
+    : q.status === 'allowed' && tier === 2 ? h(Text, { color: C.warn }, '◐ reserve only')
+    : q.status === 'allowed' && tier === 9 ? h(Text, { color: C.fail }, `✗ full, back in ${backIn(q, t5) || '?'}`)
     : q.status === 'allowed' ? h(Text, { color: C.ok }, '✓ ok')
-    : q.status === 'rejected' ? h(Text, { color: C.fail }, '✗ quota exhausted')
+    : q.status === 'rejected' ? h(Text, { color: C.fail }, `✗ quota exhausted${backIn(q, t5) ? `, back in ${backIn(q, t5)}` : ''}`)
     : q.status === 'unmeasurable' ? h(Text, { color: C.muted }, '- no quota reading (not counted as full)')
     : h(Text, { color: C.fail }, `✗ token failing (HTTP ${q.http || '?'})`);
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
-    h(Box, null, mark, rank, h(Text, { color: C.cream, bold: p.active }, p.name.padEnd(pad)), h(Text, { color: C.muted }, `${kind}  ${p.email || ''}`)),
+    h(Box, null, mark, num, h(Text, { color: C.cream, bold: p.active }, p.name.padEnd(pad)), h(Text, { color: C.muted }, `${kind}  ${p.email || ''}`)),
     h(Box, { marginLeft: 2 }, h(QuotaLine, { q }), h(Text, null, '   '), status));
 }
 
@@ -223,16 +292,17 @@ function Steps({ steps, current, failedAt }) {
 }
 
 // ---- screens ---------------------------------------------------------------
-function Overview({ profiles, bg }) {
+function Overview({ profiles, bg, plan }) {
   const active = profiles.find((p) => p.active)?.name || 'none';
   const off = existsSync(join(HOME, 'autoswitch.off'));
-  const chain = loadChain();
+  const chain = plan.order;
   const last = lastDecision();
   const behind = bg && bg.sessions > 0 && bg.daemon && bg.daemon !== active;
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
     h(Box, null, h(Text, { color: C.muted }, 'autoswitch  '),
       h(Text, { color: off ? C.warn : C.ok, bold: true }, off ? 'off' : 'on'),
       h(Text, { color: C.muted }, chain.length ? `   ${chain.map((n, i) => `${RANK[i + 1] || ''} ${n}`).join('  →  ')}` : '   no rotation set')),
+    chain.length ? h(Text, { color: C.muted }, `             soonest weekly reset first; each keeps ${plan.floorPct}% until its last ${plan.releaseHours}h`) : null,
     last ? h(Text, { color: C.muted }, `             last check ${last.at}: ${last.decision} (${last.reason})`) : null,
     !bg ? h(Text, { color: C.muted }, h(Spinner, { type: 'dots' }), ' background sessions...')
       : h(Box, null, h(Text, { color: C.muted }, 'background  '),
@@ -243,6 +313,9 @@ function Overview({ profiles, bg }) {
 
 function Home({ profiles, quotas, loading, bg, onPick }) {
   const active = profiles.find((p) => p.active)?.name;
+  const plan = planOf(loadChain(), quotas, loadPolicy());
+  const pos = (n) => { const i = plan.order.indexOf(n); return i < 0 ? 99 : i; };
+  const rows = [...profiles].sort((a, b) => pos(a.name) - pos(b.name) || a.name.localeCompare(b.name));
   const behind = bg && bg.sessions > 0 && bg.daemon && bg.daemon !== active;
   const items = [
     { label: 'Switch account', value: 'switch' },
@@ -258,20 +331,21 @@ function Home({ profiles, quotas, loading, bg, onPick }) {
   ];
   return h(Box, { flexDirection: 'column' },
     h(Header, { subtitle: 'switch Claude Code accounts, no re-login' }),
-    h(Overview, { profiles, bg }),
+    h(Overview, { profiles, bg, plan }),
     profiles.length === 0
       ? h(Text, { color: C.warn }, 'No accounts yet. Choose "Add an account".')
-      : profiles.map((p) => h(ProfileRow, { key: p.name, p, q: quotas[p.name], loading, pad: Math.max(12, ...profiles.map((x) => x.name.length)) + 2 })),
+      : rows.map((p) => h(ProfileRow, { key: p.name, p, q: quotas[p.name], tier: plan.tiers[p.name], rank: pos(p.name) + 1, t5: plan.t5, loading, pad: Math.max(12, ...profiles.map((x) => x.name.length)) + 2 })),
     h(Text, { color: C.muted }, 'What do you want to do?'),
     h(Menu, { items, onSelect: (i) => onPick(i.value) }),
     h(Hint, null, '↑↓ move · Enter select · q quit'));
 }
 
-function PickProfile({ title, profiles, filter, onPick, onBack }) {
+function PickProfile({ title, profiles, filter, onPick, onBack, describe, note }) {
   useInput((_, key) => { if (key.escape) onBack(); });
-  const items = profiles.filter(filter).map((p) => ({ label: `${p.name}  ${p.email || ''}`.trim(), value: p.name }));
+  const items = profiles.filter(filter).map((p) => ({ label: describe ? describe(p) : `${p.name}  ${p.email || ''}`.trim(), value: p.name }));
   return h(Box, { flexDirection: 'column' },
     h(Header, { subtitle: title }),
+    note ? h(Box, { marginBottom: 1 }, h(Text, { color: C.cream }, note)) : null,
     items.length === 0 ? h(Text, { color: C.warn }, 'Nothing to pick here.') : h(Menu, { items, onSelect: (i) => onPick(i.value) }),
     h(Hint, null, '↑↓ move · Enter select · Esc back'));
 }
@@ -473,6 +547,7 @@ function AddAccount({ profiles, onBack, onSwitch, onFullLogin }) {
 function Rotation({ profiles, onBack, onRun }) {
   const [order, setOrder] = useState(null);
   const chain = loadChain();
+  const { floorPct, releaseHours } = planOf(chain, {}, loadPolicy());
   const off = existsSync(join(HOME, 'autoswitch.off'));
   useInput((_, key) => { if (key.escape) { if (order) setOrder(null); else onBack(); } });
 
@@ -495,10 +570,12 @@ function Rotation({ profiles, onBack, onRun }) {
   }
   return h(Box, { flexDirection: 'column' },
     h(Header, { subtitle: 'rotation and autoswitch' }),
-    h(Text, { color: C.muted }, 'The autoswitch measures every account in this order every 5 minutes, moves down when'),
-    h(Text, { color: C.muted }, 'the current one runs out, and back up as soon as an earlier one has room again.'),
+    h(Text, { color: C.muted }, 'Every 5 minutes the autoswitch measures these accounts and uses first the one whose'),
+    h(Text, { color: C.muted }, `weekly quota resets first, so none expires unused. Each keeps ${floorPct}% of its week until`),
+    h(Text, { color: C.muted }, `the last ${releaseHours}h before its reset, spent only once every account is down to its own.`),
+    h(Text, { color: C.muted }, 'This order breaks ties.'),
     h(Box, { flexDirection: 'column', marginY: 1 },
-      chain.length ? chain.map((n, i) => h(Text, { key: n, color: C.cream }, `${RANK[i + 1] || `${i + 1}.`} ${n}`)) : h(Text, { color: C.warn }, 'No rotation yet.')),
+      chain.length ? chain.map((n, i) => h(Text, { key: n, color: C.cream }, `${i + 1}. ${n}`)) : h(Text, { color: C.warn }, 'No rotation yet.')),
     h(Box, null, h(Text, { color: C.muted }, 'autoswitch is '), h(Text, { color: off ? C.warn : C.ok, bold: true }, off ? 'off' : 'on')),
     h(Menu, { items: [
       { label: 'Change the order', value: 'order' },
@@ -574,7 +651,36 @@ function App() {
     else if (v === 'doctor') showResult('doctor', run(['doctor']));
     else if (v === 'update') setScreen('update');
   } });
-  if (screen === 'switch') return h(PickProfile, { title: 'switch to which account?', profiles, filter: (p) => !p.active, onBack: goHome, onPick: (n) => showResult(`switch to ${n}`, run(['use', n])) });
+  if (screen === 'switch') {
+    const activeName = profiles.find((p) => p.active)?.name;
+    const lastTo = (() => { try { return JSON.parse(readFileSync(join(HOME, 'autoswitch-state.json'), 'utf8')).to || null; } catch { return null; } })();
+    const plan = planOf(loadChain(), quotas, loadPolicy(), { active: activeName, lastTo });
+    const pos = (n) => { const i = plan.order.indexOf(n); return i < 0 ? 99 : i; };
+    const pad = Math.max(12, ...profiles.map((x) => x.name.length)) + 2;
+    const moves = plan.pick && plan.pick !== activeName;
+    const describe = (p) => {
+      const q = quotas[p.name];
+      if (!q || q.u7 == null) return `${p.name.padEnd(pad)}no quota reading`;
+      const t = plan.tiers[p.name];
+      const tag = moves && p.name === plan.pick ? '   recommended' : t === 2 ? '   reserve only' : t === 9 ? `   full, back in ${backIn(q, plan.t5) || '?'}` : '';
+      return `${p.name.padEnd(pad)}5h ${String(q.u5).padStart(3)}%   7d ${String(q.u7).padStart(3)}% ↻${until(q.r7) || '?'}${tag}`;
+    };
+    const reserve = `its ${plan.floorPct}% reserve`;
+    const note = !plan.pick ? null
+      : moves ? `Recommended: ${plan.pick}${{
+        resets_sooner: `, its weekly quota resets before ${activeName}'s (in ${until(quotas[plan.pick]?.r7) || '?'})`,
+        first_in_rotation: ', first in the rotation and with room again',
+        at_floor: `: ${activeName} is down to ${reserve}`,
+        full: `: ${activeName} is full`,
+      }[plan.why] || ''}.`
+      : `The autoswitch would stay on ${activeName}${{
+        room: `: no account that resets sooner has room worth a switch`,
+        manual: `: you picked it and it still has room above ${reserve}`,
+        all_at_floor: `: every other account is down to its reserve too`,
+        none_left: ': no other account has room',
+      }[plan.why] || ''}.`;
+    return h(PickProfile, { title: 'switch to which account?', profiles: [...profiles].sort((a, b) => pos(a.name) - pos(b.name)), filter: (p) => !p.active, describe, note, onBack: goHome, onPick: (n) => showResult(`switch to ${n}`, run(['use', n])) });
+  }
   if (screen === 'renew-pick') return h(PickProfile, { title: 'renew the token of which profile?', profiles, filter: (p) => p.measurable, onBack: goHome, onPick: (n) => { setPicked(profiles.find((p) => p.name === n)); setScreen('renew'); } });
   if (screen === 'renew') return h(Renew, { profile: picked, onBack: goHome });
   if (screen === 'add') return h(AddAccount, { profiles, onBack: goHome, onSwitch: (n) => showResult(`switch to ${n}`, run(['use', n])), onFullLogin: (n) => { loginAfterExit = n; exit(); } });
@@ -589,7 +695,8 @@ function App() {
 }
 
 let loginAfterExit = null;
-render(h(App)).waitUntilExit().then(() => {
+// Imported (by the tests, for planOf) it only defines; run as a program it draws the screen.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) render(h(App)).waitUntilExit().then(() => {
   if (!loginAfterExit) return;
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   process.stdin.pause();

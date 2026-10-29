@@ -164,9 +164,11 @@ never opens a browser again.
 ## Wizard
 
 `claude-account wizard` is the same engine behind a screen. The top shows whether the
-autoswitch is on, the order it walks (① ② ③), what it decided last, and which account the
-background sessions run on; below, every profile with its rank and its 5h and 7d quota bars. From
-there: switch (every session moves along), add an account, change the rotation or turn the
+autoswitch is on, the order it uses the accounts in (① ② ③, soonest weekly reset first), what it
+decided last, and which account the background sessions run on; below, every profile with its
+rank, its 5h and 7d quota bars and the time until each window resets (↻1d16h), marked `reserve
+only` when it is down to its floor. Switch lists every account with its quota and reset, and
+names the account the autoswitch would move to now, or says why it would stay. From there: switch (every session moves along), add an account, change the rotation or turn the
 autoswitch off, renew, full login, doctor. When the background sessions are not on the active
 account yet, the menu offers to move them now.
 
@@ -206,14 +208,17 @@ claude-account add-oauth personal-measure --measure-for personal
 
 ### `claude-account-autoswitch`
 
-A job for launchd or cron, every 5 minutes. It measures the two profiles named in
-`~/.config/claude-account/policy.json`, moves the active profile to `fallback` when `preferred`
-reaches the exhaustion thresholds, and returns when `preferred` has room again (hysteresis, a
-minimum interval between switches and a daily cap). It also writes `measure.json` with the last
-24 samples per profile, so a status line or any other reader consumes a file instead of calling
-the API. `reserves` is optional: more accounts, in order, that the switcher uses when the
-preferred and the fallback are both exhausted, and leaves (back up the chain) as soon as an
-earlier account is under `return_below` again.
+A job for launchd or cron, every 5 minutes. It measures the accounts named in
+`~/.config/claude-account/policy.json` (`preferred`, `fallback` and the optional `reserves`) and
+uses first the one whose weekly quota resets first, so no quota expires unused; the chain order
+only breaks ties. Each account keeps `floor.seven_day` of its week in reserve until the last
+`floor.release_hours` before its reset, and a floor is spent only when no other account can take
+traffic above its own, so the reserves are the last quota used. The active account changes when it is
+down to its floor or reaches `exhausted_at`, and moves to one that resets sooner when that one
+has at least `exhausted_at - return_below` of room above its floor and its five-hour window is
+under `return_below` (hysteresis, plus a minimum interval between switches and a daily cap). It
+also writes `measure.json` with the last 24 samples per profile, so a status line or any other
+reader consumes a file instead of calling the API.
 
 ```json
 {
@@ -222,13 +227,14 @@ earlier account is under `return_below` again.
   "reserves": ["third"],
   "exhausted_at": {"five_hour": 0.95, "seven_day": 0.97},
   "return_below": {"five_hour": 0.70, "seven_day": 0.90},
+  "floor": {"seven_day": 0.10, "release_hours": 24},
   "min_switch_interval_min": 10,
   "max_switches_per_day": 12
 }
 ```
 
 Kill switch: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. A profile
-outside the policy that you activated by hand is never overridden, and a manual switch to any account of the chain is respected until the chosen one runs out while another has room. Try it with `--dry-run` first.
+outside the policy that you activated by hand is never overridden, and a manual switch to any account of the chain is respected until the chosen one is down to its floor while another has more than its own. Try it with `--dry-run` first.
 A LaunchAgent that runs it every 5 minutes:
 
 ```xml

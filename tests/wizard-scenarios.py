@@ -2,7 +2,7 @@
 """Drives the wizard in a pseudo-terminal with `security`, `curl`, `launchctl` and
 the native `claude` stubbed: adds an account end to end and checks the rotation
 screen. Needs node 22+ and the wizard dependencies installed by install.sh."""
-import os, pty, re, select, shutil, subprocess, sys, tempfile, time
+import json, os, pty, re, select, shutil, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPS = os.path.expanduser('~/.local/lib/claude-account-manager/wizard/node_modules')
@@ -31,7 +31,8 @@ write(f'{S}/launchctl', '#!/usr/bin/env bash\nexit 0\n', 0o755)
 write(f'{S}/curl', r'''#!/usr/bin/env bash
 case "$*" in *file://*) exec /usr/bin/curl "$@" ;; esac
 hdr=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && hdr="$2"; shift; done
-printf 'anthropic-ratelimit-unified-5h-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: 0.12\r\nanthropic-ratelimit-unified-7d-status: allowed\r\nanthropic-ratelimit-unified-7d-utilization: 0.34\r\n' > "$hdr"
+now="$(date +%s)"
+printf 'anthropic-ratelimit-unified-5h-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: 0.12\r\nanthropic-ratelimit-unified-5h-reset: %s\r\nanthropic-ratelimit-unified-7d-status: allowed\r\nanthropic-ratelimit-unified-7d-utilization: 0.34\r\nanthropic-ratelimit-unified-7d-reset: %s\r\n' "$((now + 7200))" "$((now + 108000))" > "$hdr"
 printf 200
 ''', 0o755)
 write(f'{S}/claude', r'''#!/usr/bin/env bash
@@ -112,8 +113,42 @@ def check(name, ok):
     runs += 1
     print(('ok   ' if ok else 'FAIL ') + name)
     fails += 0 if ok else 1
+    if not ok:  # what the screen showed last, to tell a wrong screen from a slow one
+        print('     screen: ' + re.sub(r'\s+', ' ', re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07', ' ', screen))[-500:])
 
 DOWN = '\x1b[B'
+
+# planOf takes the same decisions as bin/claude-account-autoswitch (same cases as
+# tests/autoswitch-scenarios.sh): imported, the wizard defines and draws nothing.
+PARITY = r'''
+import { planOf } from '%s/index.mjs';
+const now = Math.floor(Date.now() / 1000);
+const q = (f5, f7, h) => ({ status: 'allowed', f5, f7, r7: now + h * 3600 });
+const pol = { exhausted_at: { five_hour: 0.95, seven_day: 0.97 }, return_below: { five_hour: 0.70, seven_day: 0.90 } };
+const opt = (active, lastTo) => ({ active, lastTo, out: new Set(), now });
+const real = (h) => ({ proteauto: q(0.02, 0.84, h), 'leo-iacall': q(0.63, 0.93, h + 8), 'leonardo-rejani': q(0, 0.37, h + 56), quasar: q(0, 0.65, h + 7) });
+const chain4 = ['proteauto', 'leo-iacall', 'leonardo-rejani', 'quasar'];
+const r = (p) => `${p.pick}/${p.why}`;
+console.log(JSON.stringify({
+  stays_little_room_sooner: r(planOf(['a', 'b'], { a: q(0.1, 0.82, 30), b: q(0.1, 0.3, 88) }, pol, opt('a', 'a'))),
+  no_up_five_hours: r(planOf(['a', 'b', 'c'], { a: q(0.1, 0.1, 200), b: q(0.1, 0.1, 100), c: q(0.8, 0.1, 30) }, pol, opt('b', 'b'))),
+  up_resets_sooner: r(planOf(['a', 'b', 'c'], { a: q(0.1, 0.1, 200), b: q(0.1, 0.1, 100), c: q(0.1, 0.1, 30) }, pol, opt('b', 'b'))),
+  at_floor: r(planOf(['a', 'b', 'c'], { a: q(0.1, 0.9, 50), b: q(0.1, 0.5, 100), c: q(0.1, 0.5, 120) }, pol, opt('a', 'a'))),
+  all_at_floor: r(planOf(['a', 'b', 'c'], { a: q(0.1, 0.9, 50), b: q(0.1, 0.9, 100), c: q(0.1, 0.9, 120) }, pol, opt('a', 'a'))),
+  manual_at_floor: r(planOf(['a', 'b', 'c'], { a: q(0.1, 0.5, 100), b: q(0.99, 0.5, 30), c: q(0.1, 0.9, 50) }, pol, opt('c', 'a'))),
+  real_29_10: r(planOf(chain4, real(32), pol, opt('leo-iacall', 'proteauto'))),
+  real_29_10_last_day: r(planOf(chain4, real(10), pol, opt('quasar', 'quasar'))),
+}));
+''' % W
+par = subprocess.run(['node', '--input-type=module', '-e', PARITY], env=dict(os.environ, CLAUDE_ACCOUNT_HOME=H, NODE_NO_WARNINGS='1'),
+                     capture_output=True, text=True, timeout=60)
+got = json.loads(par.stdout or '{}') if par.returncode == 0 else {}
+for case, want in [('stays_little_room_sooner', 'a/room'), ('no_up_five_hours', 'b/room'), ('up_resets_sooner', 'c/resets_sooner'),
+                   ('at_floor', 'b/at_floor'), ('all_at_floor', 'a/all_at_floor'), ('manual_at_floor', 'a/at_floor'),
+                   ('real_29_10', 'quasar/at_floor'), ('real_29_10_last_day', 'proteauto/resets_sooner')]:
+    check(f'parity with the autoswitch: {case} -> {want}', got.get(case) == want)
+if par.returncode != 0:
+    print(par.stderr[-800:])
 check('home shows the rotation in the overview', read_until(r'autoswitch\s+on.*proteauto.*leo'))
 check('home lists "Add an account"', read_until(r'Add an account'))
 send(DOWN)              # Switch account -> Add an account (no move pending: 0 sessions)
@@ -134,21 +169,33 @@ check('add: the token never reached the screen', 'WIZTOKEN' not in screen)
 
 kc = os.path.join(KC, 'Claude_Code_OAuth_Token_-_terceira')
 check('stored in the Keychain stub', os.path.exists(kc) and open(kc).read() == 'sk-ant-oat01-WIZTOKEN')
-import json
 prof = json.load(open(f'{H}/profiles/terceira.json'))
 check('profile has the e-mail', prof.get('account') == 't@x.io')
 check('rotation got the reserve', json.load(open(f'{H}/policy.json')).get('reserves') == ['terceira'])
 
 send(DOWN * 2 + '\r', 1.5)  # Back (never the first item: it switches accounts)
-check('back on home with three accounts ranked', read_until(r'③ terceira[\s\S]*What do you want to do', 20))
+check('back on home with three accounts', read_until(r'terceira[\s\S]*What do you want to do', 20))
 check('back on home: nothing was switched', open(f'{H}/active').read().strip() == 'proteauto')
 
+# Only terceira is measured (the stub resets its week in 30h): the known reset goes first. Its
+# rank shows only once measured, so this waits for the measurement too, wherever it landed.
+check('home: the account whose week resets first is ranked first', read_until(r'① terceira', 30))
+check('home: the time until each window resets is shown', read_until(r'↻[12]h\d\d[\s\S]*↻1d[56]h'))
+check('home: the overview says how the order works', read_until(r'soonest weekly reset first; each keeps 10% until its last 24h'))
 screen = ''
-read_until(r'✓ ok|not measured|no measuring token|token failing', 20); time.sleep(1.0)  # home done measuring
+send('\r', 1.5)  # Switch account
+check('switch: each option shows its quota and reset', read_until(r'terceira\s+5h\s+12%\s+7d\s+34% ↻1d[56]h'))
+# The active account has no quota reading: the autoswitch stays put, so nothing is recommended.
+check('switch: no recommendation while the active account is unmeasured', 'Recommended' not in screen and 'recommended' not in screen)
+screen = ''
+os.write(fd, b'\x1b'); pump(1.0)
+check('switch: Esc goes back home', read_until(r'What do you want to do'))
+read_until(r'✓ ok', 20); time.sleep(1.0)
 screen = ''
 send(DOWN + DOWN + '\r', 1.0)  # Switch, Add, Rotation
 check('rotation: opens its screen', read_until(r'rotation and autoswitch'))
-check('rotation: lists the chain in order', read_until(r'rotation and autoswitch[\s\S]*① proteauto\s+② leo\s+③ terceira'))
+check('rotation: explains the reset order and the floor', read_until(r'weekly quota resets first[\s\S]*keeps 10% of its week'))
+check('rotation: lists the chain that breaks ties', read_until(r'rotation and autoswitch[\s\S]*1\. proteauto\s+2\. leo\s+3\. terceira'))
 send(DOWN + '\r', 1.5)  # Change the order, Turn the autoswitch off
 check('rotation: autoswitch turned off', read_until(r'autoswitch: off'))
 check('rotation: kill switch written', os.path.exists(f'{H}/autoswitch.off'))

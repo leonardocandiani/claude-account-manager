@@ -162,9 +162,11 @@ de conta nunca mais abre o navegador.
 ## Wizard
 
 `claude-account wizard` é o mesmo motor atrás de uma tela. No topo: se o autoswitch está ligado,
-a ordem que ele percorre (① ② ③), o que ele decidiu por último e em que conta estão as sessões em
-background; embaixo, cada perfil com a posição e as barras de cota de 5h e 7d. Dali você troca de
-conta (todas as sessões vão junto), adiciona conta, muda o rodízio ou desliga o autoswitch,
+a ordem em que ele usa as contas (① ② ③, reset semanal mais próximo primeiro), o que ele decidiu
+por último e em que conta estão as sessões em background; embaixo, cada perfil com a posição, as
+barras de cota de 5h e 7d e quanto falta para cada janela renovar (↻1d16h), marcado `reserve
+only` quando só sobrou o piso. A troca lista cada conta com cota e reset e diz para qual conta o
+autoswitch iria agora, ou por que ficaria. Dali você troca de conta (todas as sessões vão junto), adiciona conta, muda o rodízio ou desliga o autoswitch,
 renova, faz o login completo ou roda o doctor. Quando as sessões em background ainda não estão na
 conta ativa, o menu oferece movê-las na hora.
 
@@ -204,14 +206,17 @@ claude-account add-oauth pessoal-medida --measure-for pessoal
 
 ### `claude-account-autoswitch`
 
-Um job pra launchd ou cron, a cada 5 minutos. Mede os dois perfis nomeados em
-`~/.config/claude-account/policy.json`, move o perfil ativo pro `fallback` quando o `preferred`
-bate os limiares de esgotamento, e volta quando o `preferred` tem folga de novo (histerese,
+Um job pra launchd ou cron, a cada 5 minutos. Mede as contas nomeadas em
+`~/.config/claude-account/policy.json` (`preferred`, `fallback` e o `reserves` opcional) e usa
+primeiro a que tem o reset semanal mais próximo, para nenhuma cota vencer sem uso; a ordem da
+cadeia só desempata. Cada conta guarda `floor.seven_day` da semana como reserva até as últimas
+`floor.release_hours` antes do reset, e um piso só é gasto quando nenhuma outra conta consegue
+atender acima do próprio piso, então as reservas são a última cota usada. A conta ativa muda quando chega ao piso ou ao
+`exhausted_at`, e passa para uma que renova antes quando essa tem pelo menos `exhausted_at -
+return_below` de folga acima do piso e a janela de 5 horas abaixo do `return_below` (histerese,
 intervalo mínimo entre trocas e teto diário). Também grava o `measure.json` com as últimas 24
 amostras por perfil, pra status line ou qualquer outro leitor consumir um arquivo em vez de chamar
-a API. O `reserves` é opcional: mais contas, em ordem, que o autoswitch usa quando a preferida e
-a de fallback esgotam, e que ele deixa (subindo a cadeia) assim que uma conta anterior volta a
-ficar abaixo do `return_below`.
+a API.
 
 ```json
 {
@@ -220,13 +225,14 @@ ficar abaixo do `return_below`.
   "reserves": ["terceira"],
   "exhausted_at": {"five_hour": 0.95, "seven_day": 0.97},
   "return_below": {"five_hour": 0.70, "seven_day": 0.90},
+  "floor": {"seven_day": 0.10, "release_hours": 24},
   "min_switch_interval_min": 10,
   "max_switches_per_day": 12
 }
 ```
 
 Botão de desligar: `touch ~/.config/claude-account/autoswitch.off`. Log: `autoswitch.log`. Perfil
-fora da política ativado à mão nunca é sobrescrito, e uma troca manual para qualquer conta da cadeia é respeitada até a conta escolhida esgotar enquanto outra tem folga. Experimente com `--dry-run` antes. Um
+fora da política ativado à mão nunca é sobrescrito, e uma troca manual para qualquer conta da cadeia é respeitada até a conta escolhida chegar ao piso enquanto outra tem mais que o dela. Experimente com `--dry-run` antes. Um
 LaunchAgent que roda a cada 5 minutos:
 
 ```xml

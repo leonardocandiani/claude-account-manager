@@ -260,3 +260,32 @@ handover, nothing is restarted on top of it.
 
 **Rejected.** Turning the auto-updater back on: it would restart the daemon at an hour nobody
 chose, under the sessions running at that moment.
+
+## ADR-010: the weekly reset that comes first is used first, and every account keeps a floor
+
+The chain order alone wasted quota. On 2026-10-29 four accounts sat at 84%, 93%, 37% and 65% of
+their week, with weekly resets 32, 40, 88 and 39 hours away. The chain would have gone from the
+exhausted active account to proteauto and then to leonardo-rejani (reset in four days) while
+quasar's 35% expired unused. The two windows are fixed, not rolling: in 14,578 logged
+measurements the utilization only dropped at a reset.
+
+So the switcher sorts the chain by weekly reset, soonest first (an unknown reset goes last, the
+chain order breaks ties), which is earliest-deadline-first for quota that expires: whatever resets
+first is spent first. Each account keeps a floor, `floor.seven_day` of its week (10% by default),
+until the last `floor.release_hours` (24) before its reset, where the floor is released because
+that quota expires anyway. An account down to its floor hands over to one that still has room
+above its own, and a floor is spent only when no other account can take traffic above its own
+(down to its floor, or held by its five-hour window), so the reserves are the last quota used.
+Quarantine, the minimum interval and the daily cap can still hold the sessions on an account for
+a while.
+
+Every switch restarts sessions, so a move to an account that resets sooner needs room worth it:
+at least `exhausted_at.seven_day - return_below.seven_day` (7%) above its floor, and a five-hour
+window under `return_below.five_hour`. A manual pick is respected until it is down to its floor
+while another account has more than its own. The wizard repeats the decision (`planOf` in
+`wizard/index.mjs`, held to the same cases as the switcher by `tests/wizard-scenarios.py`) to show
+the order, the time until each window resets and where the switcher would go now.
+
+**Rejected.** Ordering by the pace needed to spend each account before its reset (remaining room
+divided by the hours left): it needs a burn rate the switcher does not have per account, and on
+one consumer at a time earliest-deadline-first already leaves nothing unused when anything can.

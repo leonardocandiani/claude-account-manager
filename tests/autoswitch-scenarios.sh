@@ -185,5 +185,55 @@ STUB_USE_FAIL=a bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
 check "garbage quarantine file: rewritten with the refusal" 1 "$(jq -r 'has("a")' "$W/cfg/autoswitch-quarantine.json" | grep -c true)"
 rm -f "$W/cfg/autoswitch-quarantine.json"
 
+# --- Order by weekly reset and the floor. On 29/10/2026 leo-iacall, picked by hand, was at
+# 93% of its week while proteauto and quasar held quota that would reset before it, and the
+# chain order would have reached leonardo-rejani (reset in 4 days) before quasar. ---
+rm -f "$W/cfg/autoswitch-quarantine.json" "$W/cfg/bg-restart.pending"
+policy '["c"]'
+usage_r() { # a5 a7 a_h b5 b7 b_h c5 c7 c_h: utilizations and hours until each weekly reset
+  local now; now="$(date -u +%s)"
+  { echo "a,allowed,200,$1,0,$2,$((now + $3 * 3600)),,"
+    echo "b,allowed,200,$4,0,$5,$((now + $6 * 3600)),,"
+    echo "c,allowed,200,$7,0,$8,$((now + ${9} * 3600)),,"; } > "$W/cfg/measured.csv"
+}
+usage_r 0.99 0.5 100  0.1 0.1 100  0.1 0.1 30
+check "reset order: an exhausted account goes to the one that resets first" "decision=c reason=exhausted_next_has_room" "$(decide a)"
+usage_r 0.1 0.1 200  0.1 0.1 100  0.1 0.1 30
+check "reset order: up to an account that resets sooner" "decision=c reason=resets_sooner_has_room" "$(decide b)"
+check "reset order: the log carries the order" 1 "$(tail -1 "$W/cfg/autoswitch.log" | grep -cE ' order=c,b,a( |$)')"
+usage_r 0.1 0.1 200  0.1 0.1 100  0.8 0.1 30
+check "reset order: not up while its five hours have not recovered" "decision=b reason=fallback_still_has_room" "$(decide b)"
+usage_r 0.1 0.1 200  0.1 0.5 100  0.1 0.85 30
+check "reset order: a sooner reset with little room is no switch" "decision=b reason=fallback_still_has_room" "$(decide b)"
+usage_r 0.1 0.1 200  0.1 0.5 100  0.1 0.85 10
+check "reset order: in its last day the floor is released and it is used" "decision=c reason=resets_sooner_has_room" "$(decide b)"
+usage_r 0.1 0.9 50  0.1 0.5 100  0.1 0.5 120
+check "floor: an account down to its floor hands over" "decision=b reason=at_floor_next_has_room" "$(decide a)"
+usage_r 0.1 0.92 10  0.1 0.5 100  0.1 0.5 120
+check "floor: released in the last 24h, the account keeps going" "decision=a reason=preferred_has_room" "$(decide a)"
+usage_r 0.1 0.9 50  0.1 0.9 100  0.1 0.9 120
+check "floor: all down to their floor, the active spends its own" "decision=a reason=floor_in_use_no_other_room" "$(decide a)"
+usage_r 0.1 0.98 50  0.1 0.9 100  0.1 0.9 60
+check "floor: exhausted, the floor that resets first is used" "decision=c reason=exhausted_next_has_room" "$(decide a)"
+usage_r 0.1 0.5 100  0.99 0.5 30  0.1 0.9 50
+check "manual: down to its floor, moves to the account with room" "decision=a reason=manual_choice_at_floor" "$(decide c a)"
+usage_r 0.1 0.5 100  0.1 0.1 20  0.1 0.5 50
+check "manual: above its floor, respected even with a sooner reset" "decision=c reason=manual_choice_respected" "$(decide c a)"
+
+# The 29/10/2026 numbers, four accounts.
+jq -n '{preferred:"proteauto", fallback:"leo-iacall", reserves:["leonardo-rejani","quasar"],
+  exhausted_at:{five_hour:0.95, seven_day:0.97}, return_below:{five_hour:0.70, seven_day:0.90}}' > "$W/cfg/policy.json"
+real29() { # hours until proteauto resets; the others keep their distance to it
+  local now; now="$(date -u +%s)"
+  { echo "proteauto,allowed,200,0.02,0,0.84,$((now + $1 * 3600)),,"
+    echo "leo-iacall,allowed,200,0.63,0,0.93,$((now + ($1 + 8) * 3600)),,"
+    echo "leonardo-rejani,allowed,200,0.0,0,0.37,$((now + ($1 + 56) * 3600)),,"
+    echo "quasar,allowed,200,0.0,0,0.65,$((now + ($1 + 7) * 3600)),,"; } > "$W/cfg/measured.csv"
+}
+real29 32
+check "29/10: leo-iacall picked by hand at 93% hands over to quasar" "decision=quasar reason=manual_choice_at_floor" "$(decide leo-iacall proteauto)"
+real29 10
+check "29/10: proteauto's last day, its quota is spent before it resets" "decision=proteauto reason=preferred_recovered" "$(decide quasar quasar)"
+
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]
