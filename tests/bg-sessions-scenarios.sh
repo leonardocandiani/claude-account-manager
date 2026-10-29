@@ -142,6 +142,16 @@ check "doctor: a full login of another account fails" 1 "$(ca doctor 2>/dev/null
 echo "W1 work@example.com" > "$STUB_EMAILS"
 check "exec exports the secure-storage dir" "$W/login-work" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv CLAUDE_SECURESTORAGE_CONFIG_DIR)"
 check "exec exports no OAuth token" "" "$(env "${envs[@]}" CLAUDE_NATIVE_BIN=/usr/bin/env "$CA" exec printenv "$TOKEN_VAR" || true)"
+# 29/10/2026: a `claude --bg` from a session at xhigh started the daemon, and every
+# background session took CLAUDE_EFFORT=xhigh from it.
+printf '#!/bin/sh\necho "effort=${CLAUDE_EFFORT:-none} job=${CLAUDE_JOB_DIR:-none} pid=${CLAUDE_PID:-none} orca=${ORCA_PANE_KEY:-none}"\n' > "$W/native-env"
+chmod +x "$W/native-env"
+sess=(CLAUDE_EFFORT=xhigh CLAUDE_JOB_DIR=/j CLAUDE_PID=9 ORCA_PANE_KEY=p CLAUDE_NATIVE_BIN="$W/native-env")
+clean="effort=none job=none pid=none orca=none"
+check "exec --bg from a session: the daemon starts clean" "$clean" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec --bg "do it")"
+check "exec agents from a session: clean" "$clean" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec agents)"
+check "exec respawn from a session: clean" "$clean" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec respawn abc)"
+check "exec of a foreground session keeps the caller's variables" "effort=xhigh job=/j pid=9 orca=p" "$(env "${envs[@]}" "${sess[@]}" "$CA" exec -p hi)"
 
 # Login shells (lib/shell-init.zsh) follow the same rule as `exec`.
 shell_env() { env HOME="$W/home" CLAUDE_ACCOUNT_HOME="$W/cfg" PATH="$S:$PATH" zsh -fc "source '$here/../lib/shell-init.zsh'; printenv $1 || true"; }

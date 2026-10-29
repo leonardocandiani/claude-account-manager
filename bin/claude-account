@@ -1587,6 +1587,12 @@ regime_effort_args() {
 
 cmd_exec() {
   apply_profile_env
+  # These can start the daemon, which keeps this environment for every background session:
+  # on 29/10/2026 a `claude --bg` run from a session at xhigh put four sessions on xhigh.
+  local v
+  case " $* " in
+    *" --bg "*|" agents "*|" daemon "*|" respawn "*) for v in $(bg_session_vars); do unset "$v"; done ;;
+  esac
   local extra; extra="$(regime_effort_args "$@")"
   [ -n "$extra" ] && note "quota in a restrictive regime: this session opens with --effort medium (pass --effort to override)" >&2
   # shellcheck disable=SC2086
