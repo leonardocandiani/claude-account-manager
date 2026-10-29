@@ -113,6 +113,34 @@ echo a > "$W/cfg/daemon-profile"; echo a > "$W/cfg/active"; rm -f "$W/cfg/autosw
 bash "$ROOT/bin/claude-account-autoswitch" --dry-run >/dev/null
 check "dry run never forces" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
 
+# 26/10/2026, MacBook: a manual switch to b left the sessions behind (--no-restart), so
+# nothing was pending, and they sat on a at 98% while the switcher respected the choice.
+rm -f "$W/cfg/calls.log" "$W/cfg/bg-restart.pending"; usage 0.5 0.98 0.1 0.5 0.1 0.1
+echo b > "$W/cfg/active"; echo a > "$W/cfg/daemon-profile"; jq -n '{to:"a"}' > "$W/cfg/autoswitch-state.json"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "sessions left behind on an exhausted account, nothing pending: moved" 1 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c '^bg-restart --force')"
+check "sessions left behind: the manual choice is kept" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c '^use')"
+check "sessions left behind: logged with the account" 1 "$(tail -2 "$W/cfg/autoswitch.log" | grep -c 'bg_restart_forced sessions_on=a')"
+# A restart in flight still shows the old account until it ends; forcing again would
+# defer, mark it pending and restart every session a second time.
+rm -f "$W/cfg/calls.log"; mkdir "$W/cfg/bg-restart.lock"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "restart in flight (lock held): not forced again" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+touch -t 200001010000 "$W/cfg/bg-restart.lock"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "a stale lock does not hold the move" 1 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c '^bg-restart --force')"
+# Its time unreadable (stat fails, as when the lock goes while read): no broken
+# arithmetic, and a lock still there is a restart in flight.
+rm -f "$W/cfg/calls.log"; touch "$W/cfg/bg-restart.lock"; mkdir -p "$W/nostat"
+printf '#!/bin/sh\nexit 1\n' > "$W/nostat/stat"; chmod +x "$W/nostat/stat"
+PATH="$W/nostat:$PATH" bash "$ROOT/bin/claude-account-autoswitch" >/dev/null 2>"$W/err"
+check "lock time unreadable: no shell error" 0 "$(grep -c 'syntax error' "$W/err")"
+check "lock time unreadable, lock there: not forced" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
+rm -rf "$W/nostat"; rmdir "$W/cfg/bg-restart.lock"
+rm -f "$W/cfg/calls.log"; echo a > "$W/cfg/active"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "daemon on the active account, nothing pending: no forced move" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c '^bg-restart')"
+
 # --- 22/10/2026, defect 2: an account without a quota reading is not a full account. ---
 # A native profile with no measuring token read "unmeasurable", and the switcher took that
 # as exhausted and tried to leave it every 5 minutes.

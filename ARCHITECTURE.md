@@ -175,8 +175,14 @@ instead:
    `bg-restart --force`. The autoswitch forces it too, but only while the daemon still runs
    on an account of the chain with no room under `exhausted_at`: on 2026-10-16 a deferred
    move left the sessions on an account at 99% of its week for six hours while the account
-   switched to had room. A move away from an account that still has room keeps waiting for
-   idle (ADR-003 holds there).
+   switched to had room. The same holds when a switch left the sessions behind on purpose
+   (`--no-restart` without `--move-agents`, or `--keep-agents`), which marks nothing pending:
+   once the account recorded in `daemon-profile` differs from the active one and has no room,
+   the autoswitch moves them (2026-10-26, MacBook: a manual switch to proteauto left the daemon
+   recorded on leo-iacall, at 98% since, and no cycle looked at it). A restart in flight holds
+   its lock until it records the new account, so the autoswitch leaves a lock younger than 10
+   minutes alone, the age `bg-restart` itself treats as stale. A move away from an account that
+   still has room keeps waiting for idle (ADR-003 holds there).
 3. A detached worker (double fork plus `setsid`, because the caller is often one of the sessions
    about to stop) holds a lock, stops the daemon from the new profile's environment and resumes
    each session with `claude --bg --resume <sessionId> "<wake prompt>"`. A prompt alone keeps the

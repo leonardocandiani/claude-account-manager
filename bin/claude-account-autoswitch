@@ -127,12 +127,24 @@ measured_ok() {
   case "$(field "$(line_of "$1")" 2)" in allowed|rejected) return 0 ;; *) return 1 ;; esac
 }
 
-# The pending move is forced when the daemon still runs on an account of the chain that
-# has no room under exhausted_at. Runs before the decision and again right after a switch.
+# The move is forced when the daemon still runs on an account of the chain that has no
+# room under exhausted_at: a move left pending, or a switch that left the sessions behind
+# on purpose (--no-restart, --keep-agents), which marks nothing pending. On 26/10/2026 a
+# manual switch to proteauto on the MacBook left the daemon recorded on leo-iacall, at 98%
+# since, and no run looked at it. A restart in flight is left to finish. Runs before the
+# decision and again after a switch.
 force_stuck_move() {
-  [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-restart.pending" ] || return 0
-  local on
+  [ "$move_agents" = true ] && [ "$dry_run" = false ] || return 0
+  local on lock_at
+  # The restart records the new account and then removes its lock, so the lock is read
+  # first: once it is gone, daemon-profile is current. It can vanish while being read.
+  if lock_at="$(stat -f %m "$CONFIG_DIR/bg-restart.lock" 2>/dev/null)"; then
+    [ $(( $(date -u +%s) - lock_at )) -lt 600 ] && return 0
+  elif [ -d "$CONFIG_DIR/bg-restart.lock" ]; then
+    return 0
+  fi
   on="$(tr -d '[:space:]' < "$CONFIG_DIR/daemon-profile" 2>/dev/null || true)"
+  [ -f "$CONFIG_DIR/bg-restart.pending" ] || [ "$on" != "$(tr -d '[:space:]' < "$CONFIG_DIR/active" 2>/dev/null)" ] || return 0
   [ -n "$on" ] && in_chain "$on" || return 0
   measured_ok "$on" || return 0
   [ "$(tier "$on")" -lt 9 ] && return 0
