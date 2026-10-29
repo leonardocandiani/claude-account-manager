@@ -66,7 +66,18 @@ case "$1" in
     else echo '{"loggedIn":false}'; fi ;;
   agents) [ -f "$STUB_AGENTS.fail" ] && exit 1; cat "$STUB_AGENTS" ;;
   daemon|respawn|stop) echo "$*" >> "$STUB_LOG" ;;
-  --bg) echo "bg ss=${CLAUDE_SECURESTORAGE_CONFIG_DIR:-none} $*" >> "$STUB_LOG"; echo "backgrounded · abcd1234 · X" ;;
+  --bg)
+    echo "bg ss=${CLAUDE_SECURESTORAGE_CONFIG_DIR:-none} $*" >> "$STUB_LOG"
+    # What the resumed session would get: the login its job still carries, and the
+    # variables of whoever started the daemon.
+    if [ "${2:-}" = --resume ]; then
+      st="$HOME/.claude/jobs/${3:0:8}/state.json"
+      echo "resume ${3:0:8} pin=$(jq -r '.providerEnv.CLAUDE_SECURESTORAGE_CONFIG_DIR // "none"' "$st" 2>/dev/null || echo nojob) job=${CLAUDE_JOB_DIR:-none} orca=${ORCA_PANE_KEY:-none} effort=${CLAUDE_EFFORT:-none}" >> "$STUB_LOG.env"
+      case " ${STUB_RESUME_FAIL:-} " in
+        *" ${3:0:8} "*) echo "Workspace not trusted. Run \`claude\` in $PWD once and accept the trust prompt, then retry." >&2; exit 1 ;;
+      esac
+    fi
+    echo "backgrounded · abcd1234 · X" ;;
 esac
 EOF
 chmod +x "$S/security" "$S/launchctl" "$S/claude"
@@ -488,6 +499,43 @@ ca use personal --no-restart >/dev/null 2>&1
 check "then use: the sessions move onto the fresh login" PG "$(live .claudeAiOauth.accessToken)"
 check "then use: the slot is the profile's again" personal "$(cat "$W/cfg/native-owner")"
 check "then use: the other login is still kept" RQ "$(kc_get 'Claude Code-credentials-last-login-archive' | jq -r .claudeAiOauth.refreshToken)"
+
+# --- 29/10/2026: the restart reaches every session, whoever runs it. ---
+# A session born under the full login keeps it in its job (providerEnv), and Claude Code
+# applied it on resume: seven sessions stayed on the old account after the switch. A
+# conversation listed twice was resumed twice, and the second resume started a copy. The
+# daemon kept the environment of the session that ran the restart (Orca pane, --effort).
+echo personal > "$W/cfg/daemon-profile"
+job eeee5555 eeee5555-0000-0000-0000-000000000005 EPSILON '["--name","EPSILON","--dangerously-skip-permissions"]'
+job ffff6666 ffff6666-0000-0000-0000-000000000006 ZETA '["--name","ZETA","--dangerously-skip-permissions"]'
+jq --arg d "$W/login-work" '.providerEnv = {CLAUDE_SECURESTORAGE_CONFIG_DIR: $d, CLAUDE_CODE_PLUGIN_DIRS: "/agent-view"}' \
+  "$W/home/.claude/jobs/eeee5555/state.json" > "$W/st.tmp" && mv "$W/st.tmp" "$W/home/.claude/jobs/eeee5555/state.json"
+jq -n --arg c "$W" '[{kind:"background",id:"eeee5555",sessionId:"eeee5555-0000-0000-0000-000000000005",name:"EPSILON",status:"idle",cwd:$c},
+                     {kind:"background",id:"ffff6666",sessionId:"ffff6666-0000-0000-0000-000000000006",name:"ZETA",status:"idle",cwd:$c},
+                     {kind:"background",id:"eeee5555",sessionId:"eeee5555-0000-0000-0000-000000000005",name:"EPSILON",status:"idle",cwd:$c}]' > "$STUB_AGENTS"
+check "bg-status: a session on another login is listed as pinned" "pinned[1]{id,name,login}:|  eeee5555,EPSILON,login-work" \
+  "$(ca bg-status | grep -A1 '^pinned' | paste -sd '|' -)"
+# A copy lives under its own job; a plain resume goes to the job of its session id, so a
+# login left there comes back too.
+mkdir -p "$W/home/.claude/jobs/abab0000"
+jq -n --arg d "$W/login-work" '{name:"COPY-BASE", providerEnv:{CLAUDE_SECURESTORAGE_CONFIG_DIR:$d}}' > "$W/home/.claude/jobs/abab0000/state.json"
+jq --arg c "$W" '. + [{kind:"background",id:"cdcd0000",sessionId:"abab0000-0000-0000-0000-000000000009",name:"COPY",status:"idle",cwd:$c}]' \
+  "$STUB_AGENTS" > "$STUB_AGENTS.tmp" && mv "$STUB_AGENTS.tmp" "$STUB_AGENTS"
+check "bg-status: a login left in the job of the session id is listed too" 1 "$(ca bg-status | grep -c '^  abab0000,COPY-BASE,login-work$')"
+: > "$STUB_LOG"; : > "$STUB_LOG.env"; : > "$W/cfg/bg-restart.log"
+STUB_RESUME_FAIL=ffff6666 CLAUDE_JOB_DIR=/leak ORCA_PANE_KEY=leak CLAUDE_EFFORT=xhigh ca bg-restart --force >/dev/null; wait_worker
+check "restart: the pinned session is resumed without its old login" "resume eeee5555 pin=none" "$(grep -o '^resume eeee5555 pin=[^ ]*' "$STUB_LOG.env")"
+check "restart: the unpin is logged" 1 "$(grep -c '^unpinned EPSILON eeee5555 login=login-work$' "$W/cfg/bg-restart.log")"
+check "restart: the job's other variables are kept" /agent-view "$(jq -r .providerEnv.CLAUDE_CODE_PLUGIN_DIRS "$W/home/.claude/jobs/eeee5555/state.json")"
+check "restart: a conversation listed twice is resumed once" 1 "$(grep -c -- '--resume eeee5555' "$STUB_LOG")"
+check "restart: the caller's session variables do not reach the daemon" "3 0" \
+  "$(grep -c . "$STUB_LOG.env") $(grep -cvE 'job=none orca=none effort=none$' "$STUB_LOG.env")"
+check "restart: the wake prompt points to ListAgents" 3 "$(grep -c 'run ListAgents before SendMessage' "$STUB_LOG")"
+check "restart: the job of the copy's session id is cleaned too" 1 "$(grep -c '^unpinned COPY abab0000 login=login-work$' "$W/cfg/bg-restart.log")"
+check "bg-status: nothing pinned after the restart" 0 "$(ca bg-status | grep -c '^pinned')"
+check "bg-status: a resume that failed is shown with its folder" "resume_failed_last_restart: ZETA ($W)" \
+  "$(ca bg-status | grep '^resume_failed_last_restart:')"
+echo '[]' > "$STUB_AGENTS"
 
 echo "$runs cases, $fails failures"
 [ "$fails" -eq 0 ]

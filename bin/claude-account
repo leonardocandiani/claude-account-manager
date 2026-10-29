@@ -969,6 +969,41 @@ bg_sessions_json() {
     <<<"$raw" 2>/dev/null || return 1
 }
 
+# What a session or a terminal pane sets for itself. The restarted daemon keeps the
+# environment of whoever started it and hands it to every background session: on
+# 29/10/2026 a restart run from inside a session gave all of them its Orca pane, its
+# Codex session and its --effort xhigh.
+bg_session_vars() {
+  compgen -e | grep -E '^(ORCA_.*|CODEX_COMPANION_.*|CLAUDE_BG_.*|CLAUDECODE|CLAUDE_CODE_(ENTRYPOINT|EXECPATH|CHILD_SESSION|SESSION_ID|SESSION_KIND|SESSION_ATTENDED|MESSAGING_SOCKET|MESSAGING_TOKEN|PLUGIN_DIRS)|CLAUDE_(JOB_DIR|PID|EFFORT|PLUGIN_DATA))$' || true
+}
+
+# Claude Code keeps the credential variables a session was created with (providerEnv in
+# its job) and applies them on every resume, over the daemon's environment. A session born
+# while a full-login profile was active stayed on that login after every switch (29/10:
+# seven sessions kept spending leo-iacall at 97% after the move to quasar). Removed while
+# the daemon is down, before the resume, so the daemon's profile reaches every session.
+bg_unpin_jobs() {
+  local snapshot="$1" n i id sid name state pin tmp
+  n="$(jq length "$snapshot")"
+  for ((i = 0; i < n; i++)); do
+    id="$(jq -r ".[$i].id // empty" "$snapshot")"
+    sid="$(jq -r ".[$i].sessionId" "$snapshot")"
+    name="$(jq -r ".[$i].name // \"-\"" "$snapshot")"
+    for state in "$HOME/.claude/jobs/$id/state.json" "$HOME/.claude/jobs/${sid:0:8}/state.json"; do
+      [ -f "$state" ] || continue
+      pin="$(jq -r '.providerEnv // {} | if has("CLAUDE_CODE_OAUTH_TOKEN") then "token"
+        else (.CLAUDE_SECURESTORAGE_CONFIG_DIR // "" | split("/") | last // "") end' "$state" 2>/dev/null)" || continue
+      [ -n "$pin" ] || continue
+      tmp="$(mktemp "$state.XXXXXX")" || continue
+      if jq '.providerEnv |= del(.CLAUDE_SECURESTORAGE_CONFIG_DIR, .CLAUDE_CODE_OAUTH_TOKEN)' "$state" > "$tmp" && mv "$tmp" "$state"; then
+        printf 'unpinned %s %s login=%s\n' "$name" "$(basename "$(dirname "$state")")" "$pin"
+      else
+        rm -f "$tmp"
+      fi
+    done
+  done
+}
+
 # Held by the worker from snapshot to the last resume. A second restart while
 # one runs (autoswitch firing a pending one and then `use`, two quick `use`)
 # would snapshot half-resumed sessions and stop the daemon under them.
@@ -1028,11 +1063,16 @@ cmd_bg_restart() {
     note "bg-restart: deferred, another restart just started"
     return 0
   fi
-  printf '%s\n' "$sessions" > "$BG_SNAPSHOT_FILE"
+  # One entry per conversation: on 28/10/2026 a session listed twice was resumed twice,
+  # and the second resume started a copy of it that every restart woke again.
+  jq -c 'reduce .[] as $s ([]; if any(.[]; .sessionId == $s.sessionId) then . else . + [$s] end)' \
+    <<<"$sessions" > "$BG_SNAPSHOT_FILE"
   rm -f "$BG_PENDING_FILE"
   # Double fork + setsid: the caller is often one of the sessions the daemon
   # stop is about to kill, and the worker must outlive it.
-  perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec @ARGV' \
+  # shellcheck disable=SC2046
+  env $(bg_session_vars | sed 's/^/-u /') \
+    perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exit 0 if fork; exec @ARGV' \
     "$0" _bg-restart-worker "$BG_SNAPSHOT_FILE" </dev/null >>"$BG_LOG" 2>&1
   note "bg-restart: moving $count background session(s) to '$active' (log: $BG_LOG)"
   note "help: claude-account bg-status"
@@ -1087,10 +1127,11 @@ cmd_bg_restart_worker() {
       return 0
     fi
   fi
-  wake="claude-account: the background-session daemon was restarted to move to profile '$active'. Your monitors and background shells died in the restart; start again what was running and carry on where you left off. If nothing was running, just reply ok."
+  wake="claude-account: the background-session daemon was restarted to move to profile '$active'. Your monitors and background shells died in the restart; start again what was running and carry on where you left off. The other sessions restarted too, so their message addresses changed: run ListAgents before SendMessage. If nothing was running, just reply ok."
   sleep "$BG_SETTLE_S"
   "$NATIVE_BIN" daemon stop --any || true
   sleep "$BG_SETTLE_S"
+  bg_unpin_jobs "$snapshot"
   n="$(jq length "$snapshot")"
   for ((i = 0; i < n; i++)); do
     sid="$(jq -r ".[$i].sessionId" "$snapshot")"
@@ -1146,7 +1187,7 @@ bg_restore_identity() {
 }
 
 cmd_bg_status() {
-  local sessions daemon_profile missing
+  local sessions daemon_profile missing pinned failed id state
   apply_profile_env
   sessions="$(bg_sessions_json)" || { sessions='[]'; printf 'warning: claude agents --json failed, session list unavailable\n'; }
   daemon_profile="$(cat "$DAEMON_PROFILE_FILE" 2>/dev/null || echo unknown)"
@@ -1160,6 +1201,25 @@ cmd_bg_status() {
       "$BG_SNAPSHOT_FILE")"
     [ -n "$missing" ] && printf 'missing_since_last_restart: %s\n' "$missing"
   fi
+  # A session that carries a login of its own ignores the daemon's profile. Both jobs a
+  # session can come back in are checked, as bg_unpin_jobs cleans both.
+  pinned="$(jq -r '[.[] | .id, (.sessionId // "" | .[0:8])] | map(select(. != "")) | unique | .[]' <<<"$sessions" \
+    | while read -r id; do
+        state="$HOME/.claude/jobs/$id/state.json"
+        [ -f "$state" ] || continue
+        jq -r --arg id "$id" --arg want "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" '
+          (.providerEnv // {}) as $p
+          | if $p | has("CLAUDE_CODE_OAUTH_TOKEN") then "  \($id),\(.name // "-"),token"
+            elif ($p.CLAUDE_SECURESTORAGE_CONFIG_DIR // $want) != $want then "  \($id),\(.name // "-"),\($p.CLAUDE_SECURESTORAGE_CONFIG_DIR | split("/") | last)"
+            else empty end' "$state" 2>/dev/null
+      done)"
+  if [ -n "$pinned" ]; then
+    printf 'pinned[%s]{id,name,login}:\n%s\n' "$(printf '%s\n' "$pinned" | wc -l | tr -d ' ')" "$pinned"
+    printf 'help: these sessions ignore the switch; claude-account bg-restart --force moves them\n'
+  fi
+  failed="$(awk '/ start profile=/{f=""} /^resume_failed /{f=f $0 "\n"} END{printf "%s", f}' "$BG_LOG" 2>/dev/null \
+    | sed -E 's/^resume_failed (.*) [0-9a-f-]{36} cwd=(.*)$/\1 (\2)/' | paste -sd ';' -)"
+  [ -n "$failed" ] && printf 'resume_failed_last_restart: %s\n' "$failed"
   if [ "$daemon_profile" != "$active" ]; then
     printf 'help: claude-account bg-restart\n'
   fi

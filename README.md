@@ -127,7 +127,7 @@ claude-account use personal
 |  | `login <name>` | browser login: for an OAuth profile, a full login in its own Keychain item (claude.ai connectors); for a native profile, a fresh login straight into its archive, without touching the live slot or the sessions on it |
 |  | `update [--apply [version]]` | Claude Code: installed, latest and the background sessions; `--apply` installs it with the native installer, replaces `claude-stable` by an atomic rename, waits for the daemon to adopt the sessions, then restarts them (same ids) and Orca on the new version, as a switch does; `--no-restart` leaves them on the old version until they go idle |
 |  | `bg-restart [--force]` | move background sessions to the active profile, same ids (deferred while one is busy) |
-|  | `bg-status` | active profile vs the daemon's, background sessions, pending move |
+|  | `bg-status` | active profile vs the daemon's, background sessions, pending move, pinned logins, failed resumes |
 
 ## Background sessions
 
@@ -137,8 +137,11 @@ environment and resumes each one by id with a short prompt telling it that its m
 background shells died in the restart. On a manual switch a busy session is cut and comes back
 with that prompt; on an automatic one it defers the move (the autoswitch cycle finishes it once
 they are all idle, with `"move_agents": true` in the policy), unless the sessions are still on an
-account with no room left: then the autoswitch moves them right away, busy or not. `claude-account bg-status` shows whether
-the daemon runs on the active profile.
+account with no room left: then the autoswitch moves them right away, busy or not. A session
+keeps in its job the login it was created with, and the move removes it before the resume, so
+every session follows the daemon. `claude-account bg-status` shows whether the daemon runs on the
+active profile, any session still pinned to another login, and the sessions whose last resume
+failed (a folder not trusted yet, for one).
 
 `claude-sessions` handles them one at a time, always on the active profile:
 

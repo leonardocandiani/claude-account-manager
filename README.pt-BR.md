@@ -125,7 +125,7 @@ claude-account use pessoal
 |  | `login <nome>` | login pelo navegador: para um perfil OAuth, login completo num item próprio do Keychain (conectores do claude.ai); para um perfil nativo, login novo direto no arquivo dele, sem tocar no slot vivo nem nas sessões |
 |  | `update [--apply [versão]]` | Claude Code: versão instalada, a mais nova e as sessões em background; `--apply` instala pelo instalador nativo, troca o `claude-stable` por rename atômico, espera o daemon adotar as sessões e depois as reinicia (mesmos ids) junto com o Orca já na versão nova, como na troca de conta; `--no-restart` deixa elas na versão antiga até ficarem ociosas |
 |  | `bg-restart [--force]` | move as sessões em background para o perfil ativo, mesmos ids (adia se alguma estiver ocupada) |
-|  | `bg-status` | perfil ativo contra o do daemon, sessões em background, troca pendente |
+|  | `bg-status` | perfil ativo contra o do daemon, sessões em background, troca pendente, logins presos, resumes que falharam |
 
 ## Sessões em background
 
@@ -135,8 +135,11 @@ e retoma cada uma pelo mesmo id, com um prompt curto avisando que os monitores e
 background morreram no reinício. Na troca manual, uma sessão ocupada é interrompida e volta com
 esse prompt. Na troca automática, a sessão ocupada adia a troca (o ciclo do autoswitch conclui
 quando todas estiverem ociosas, com `"move_agents": true` na política), a não ser que as sessões
-ainda estejam numa conta sem folga: aí o autoswitch move na hora, ocupadas ou não. O `claude-account bg-status` mostra se o
-daemon está no perfil ativo.
+ainda estejam numa conta sem folga: aí o autoswitch move na hora, ocupadas ou não. Cada sessão
+guarda no job o login com que foi criada, e a troca apaga esse login antes do resume, então toda
+sessão segue o daemon. O `claude-account bg-status` mostra se o daemon está no perfil ativo, se
+alguma sessão ainda está presa a outro login e quais sessões falharam no último resume (uma pasta
+ainda não confiável, por exemplo).
 
 O `claude-sessions` cuida delas uma a uma, sempre no perfil ativo:
 

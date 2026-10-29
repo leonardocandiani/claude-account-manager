@@ -187,8 +187,22 @@ instead:
    the name differs or bypass is missing while the global default is `bypassPermissions`, writes
    `respawnFlags` in `state.json` and runs `claude respawn <id>`, which restarts that one session
    with those flags and keeps its id.
+5. A session keeps in its job the credential variables it was created with (`providerEnv` in
+   `state.json`: `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`), and Claude Code
+   applies them on every resume, over the daemon's environment. Between the daemon stop and the
+   first resume the worker removes them from each job of the snapshot, so the daemon's profile
+   reaches every session. On 2026-10-29 seven sessions born while the full-login profile was
+   active stayed on it, at 97% of its week, after the move to another account. `bg-status` lists
+   a session still pinned that way.
+6. The snapshot holds one entry per session id: on 2026-10-28 a conversation listed twice was
+   resumed twice, and the second resume opened a copy that every later restart woke again. The
+   worker starts without the variables a session or a terminal pane sets for itself
+   (`CLAUDE_JOB_DIR`, `CLAUDE_EFFORT`, `ORCA_*`, `CODEX_COMPANION_*` and the like), which the new
+   daemon would hand to every background session: on 2026-10-29 a restart run from inside a
+   session gave all of them its Orca pane and its `--effort xhigh`.
 
-The wake prompt tells each session that its monitors and background shells died in the restart.
+The wake prompt tells each session that its monitors and background shells died in the restart
+and that the other sessions' message addresses changed (ListAgents before SendMessage).
 A session whose identity had to be restored is respawned a few seconds after its resume, which
 cuts the wake turn short; the prompt stays in its transcript. The live slot's owner is recorded
 in `native-owner` (set when a native profile becomes active, cleared when a setup-token is
