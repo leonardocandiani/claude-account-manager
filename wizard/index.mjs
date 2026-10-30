@@ -190,6 +190,36 @@ const PTY_BRIDGE = [
 // OSC sequences (hyperlinks, titles) and CSI sequences, for plain-text matching.
 const stripOsc = (s) => s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 
+// 2.1.310 redraws by diff: it moves the cursor up and skips the cells that already hold the
+// same character, so stripping the escapes drops letters from the token (30/10/2026: 401).
+// The screen is rebuilt cell by cell instead, on a grid that grows downward like a scrollback.
+function screenRows(raw) {
+  const rows = [[]];
+  let r = 0;
+  let c = 0;
+  const s = stripOsc(raw);
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\x1b') {
+      const m = s.slice(i).match(/^\x1b\[([0-9;?>]*)([A-Za-z])/);
+      if (!m) { i += /^\x1b[()]/.test(s.slice(i, i + 2)) ? 2 : 1; continue; }
+      i += m[0].length - 1;
+      const n = Number(m[1].split(';')[0]) || 1;
+      if (m[2] === 'A') r = Math.max(0, r - n);
+      else if (m[2] === 'B') r += n;
+      else if (m[2] === 'C') c += n;
+      else if (m[2] === 'D') c = Math.max(0, c - n);
+      else if (m[2] === 'G') c = n - 1;
+      else if (m[2] === 'K') rows[r] = (rows[r] || []).slice(0, c);
+      else if (m[2] === 'J') rows.length = r + 1;
+    } else if (ch === '\r') c = 0;
+    else if (ch === '\n') r += 1;
+    else if (ch >= ' ') { (rows[r] ||= [])[c] = ch; c += 1; }
+    while (rows.length <= r) rows.push([]);
+  }
+  return Array.from(rows, (row) => Array.from(row || [], (x) => x ?? ' ').join(''));
+}
+
 // Drives `claude setup-token` through pipes: the browser is opened by the
 // child itself; we only read its screen to know when to hand over the code and
 // to catch the token. The token never reaches the terminal.
@@ -218,7 +248,9 @@ function setupToken({ onUrl, onNeedCode, onDone, onStall }) {
     }
     // 2.1.310 draws the spaces as cursor moves: the stripped screen reads "Pastecodehere".
     if (!asked && /Paste\s*code\s*here/i.test(buf)) { asked = true; onNeedCode(); }
-    const oat = buf.match(OAT)?.pop();
+    // the line under the token ends its frame, so the token row is complete by then
+    const screen = screenRows(raw).join('\n');
+    const oat = /Store\s*this\s*token/i.test(screen) && screen.match(OAT)?.pop();
     if (oat) finish({ code: 0, oat });
     else if (asked && /OAuth\s*error/i.test(buf)) finish({ code: 1, oat: null });
   };
@@ -226,7 +258,7 @@ function setupToken({ onUrl, onNeedCode, onDone, onStall }) {
   child.stderr.on('data', feed);
   child.on('error', () => finish({ code: 127, oat: null }));
   child.on('close', () => clearTimeout(stall));
-  child.on('close', (code) => finish({ code, oat: buf.match(/sk-ant-oat01-[A-Za-z0-9_-]+/g)?.pop() || null }));
+  child.on('close', (code) => finish({ code, oat: screenRows(raw).join('\n').match(/sk-ant-oat01-[A-Za-z0-9_-]+/g)?.pop() || null }));
   // The prompt reads the pty in raw mode, where only CR is Enter: with LF the code was typed
   // and never submitted.
   const sendCode = (code) => {

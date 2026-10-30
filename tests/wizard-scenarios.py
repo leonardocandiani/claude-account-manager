@@ -45,7 +45,11 @@ os.write(1, b'Open \x1b]8;;https://claude.com/oauth/x\x07this link\x1b]8;;\x07\r
 # A chunk with text is a paste, and a CR inside it is not Enter: only a lone CR submits.
 while (data := os.read(0, 4096)) not in (b'', b'\r'):
     pass
-os.write(1, b'\r\nsk-ant-oat01-WIZTOKEN\r\n')
+# The token frame is diffed against the prompt row it replaces: cells that already hold the
+# same character are skipped with a cursor move (30/10/2026: the stripped token was short, 401).
+prev, token = b'Paste code here if prompted > ', b'sk-ant-oat01-reWIZTOKEN'
+cells = b''.join(b'\x1b[1C' if i < len(prev) and prev[i] == c else bytes([c]) for i, c in enumerate(token))
+os.write(1, b'\r' + cells + b'\x1b[K\r\nStore\x1b[1Cthis\x1b[1Ctoken\x1b[1Csecurely.\r\n')
 # 2.1.310 then waits for an Enter instead of exiting.
 while os.read(0, 1) not in (b'', b'\r'):
     pass
@@ -183,7 +187,7 @@ check('add: offers to switch now', read_until(r'Switch to terceira now'))
 check('add: the token never reached the screen', 'WIZTOKEN' not in screen)
 
 kc = os.path.join(KC, 'Claude_Code_OAuth_Token_-_terceira')
-check('stored in the Keychain stub', os.path.exists(kc) and open(kc).read() == 'sk-ant-oat01-WIZTOKEN')
+check('stored in the Keychain stub', os.path.exists(kc) and open(kc).read() == 'sk-ant-oat01-reWIZTOKEN')
 prof = json.load(open(f'{H}/profiles/terceira.json'))
 check('profile has the e-mail', prof.get('account') == 't@x.io')
 check('rotation got the reserve', json.load(open(f'{H}/policy.json')).get('reserves') == ['terceira'])
