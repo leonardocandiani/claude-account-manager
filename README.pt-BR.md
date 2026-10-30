@@ -134,7 +134,8 @@ em vez de pará-las: anota quais estão vivas, reinicia o daemon a partir do amb
 e retoma cada uma pelo mesmo id, com um prompt curto avisando que os monitores e shells em
 background morreram no reinício. Na troca manual, uma sessão ocupada é interrompida e volta com
 esse prompt. Na troca automática, a sessão ocupada adia a troca (o ciclo do autoswitch conclui
-quando todas estiverem ociosas, com `"move_agents": true` na política), a não ser que as sessões
+quando todas estiverem ociosas, ou força depois de `move_wait_min` minutos de espera, 15 por
+padrão, com `"move_agents": true` na política), a não ser que as sessões
 ainda estejam numa conta sem folga: aí o autoswitch move na hora, ocupadas ou não, mesmo quando
 uma troca com `--no-restart` ou `--keep-agents` as deixou para trás de propósito. Cada sessão
 guarda no job o login com que foi criada, e a troca apaga esse login antes do resume, então toda

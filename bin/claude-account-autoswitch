@@ -59,8 +59,15 @@ if [ -e "$OFF" ]; then log "skip=kill_switch file=$OFF"; exit 0; fi
 # is cut and resumed by id with the wake prompt (force_stuck_move, ADR-007). Without the
 # opt-in nothing is touched.
 move_agents="$(jq -r '.move_agents // false' "$POLICY" 2>/dev/null || echo false)"
+# Waiting for every session to be idle at once never ends with twenty of them: on 30/10/2026
+# a move had waited 20 hours. After move_wait_min (default 15) of waiting the move is forced.
 if [ "$move_agents" = true ] && [ "$dry_run" = false ] && [ -f "$CONFIG_DIR/bg-restart.pending" ]; then
-  log "bg_restart_pending $("$CLI" bg-restart --if-pending 2>&1 | tr '\n' ' ' | cut -c1-200)"
+  move_wait="$(jq -r '.move_wait_min // 15' "$POLICY" 2>/dev/null || echo 15)"
+  case "$move_wait" in ''|*[!0-9]*) move_wait=15 ;; esac
+  pending_at="$(stat -f %m "$CONFIG_DIR/bg-restart.pending" 2>/dev/null || date -u +%s)"
+  move_args=(--if-pending)
+  [ $(( $(date -u +%s) - pending_at )) -ge $((move_wait * 60)) ] && move_args+=(--force)
+  log "bg_restart_pending ${move_args[*]} $("$CLI" bg-restart "${move_args[@]}" 2>&1 | tr '\n' ' ' | cut -c1-200)"
 fi
 
 pref="$(jq -r '.preferred // empty' "$POLICY")"

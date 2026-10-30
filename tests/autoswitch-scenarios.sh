@@ -113,6 +113,18 @@ echo a > "$W/cfg/daemon-profile"; echo a > "$W/cfg/active"; rm -f "$W/cfg/autosw
 bash "$ROOT/bin/claude-account-autoswitch" --dry-run >/dev/null
 check "dry run never forces" 0 "$(cat "$W/cfg/calls.log" 2>/dev/null | grep -c -- '--force')"
 
+# 30/10/2026: a deferred move waited 20 hours for twenty sessions to be idle at once. It is
+# forced after move_wait_min (15 by default) of waiting.
+rm -f "$W/cfg/calls.log"; usage 0.5 0.5 0.1 0.1 0.1 0.1
+echo b > "$W/cfg/active"; echo b > "$W/cfg/daemon-profile"; jq -n '{to:"b"}' > "$W/cfg/autoswitch-state.json"
+echo b > "$W/cfg/bg-restart.pending"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "pending move, fresh: waits for idle" "bg-restart --if-pending" "$(head -1 "$W/cfg/calls.log")"
+rm -f "$W/cfg/calls.log"; echo b > "$W/cfg/bg-restart.pending"; touch -t 200001010000 "$W/cfg/bg-restart.pending"
+bash "$ROOT/bin/claude-account-autoswitch" >/dev/null
+check "pending move, waited past move_wait_min: forced" "bg-restart --if-pending --force" "$(head -1 "$W/cfg/calls.log")"
+rm -f "$W/cfg/calls.log" "$W/cfg/bg-restart.pending"
+
 # 26/10/2026, MacBook: a manual switch to b left the sessions behind (--no-restart), so
 # nothing was pending, and they sat on a at 98% while the switcher respected the choice.
 rm -f "$W/cfg/calls.log" "$W/cfg/bg-restart.pending"; usage 0.5 0.98 0.1 0.5 0.1 0.1

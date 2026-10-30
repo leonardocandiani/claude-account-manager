@@ -170,7 +170,8 @@ instead:
    that keeps the move pending, never "zero sessions".
 2. If one is `busy` or `shell` (alive with a background shell), defer: write
    `bg-restart.pending`; with `"move_agents": true` in the policy the autoswitch cycle finishes
-   the move once all are idle. A manual `use` or `login` forces the move (a busy session is
+   the move once all are idle, or forces it once it has waited `move_wait_min` minutes (15 by
+   default; on 2026-10-30 a move waited 20 hours for twenty sessions to be idle at once). A manual `use` or `login` forces the move (a busy session is
    cut and resumed with the wake prompt, by decision of the operator, 2026-10-09), as does
    `bg-restart --force`. The autoswitch forces it too, but only while the daemon still runs
    on an account of the chain with no room under `exhausted_at`: on 2026-10-16 a deferred

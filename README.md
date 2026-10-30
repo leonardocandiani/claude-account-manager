@@ -136,7 +136,8 @@ sessions instead of stopping them: it snapshots them, restarts the daemon from t
 environment and resumes each one by id with a short prompt telling it that its monitors and
 background shells died in the restart. On a manual switch a busy session is cut and comes back
 with that prompt; on an automatic one it defers the move (the autoswitch cycle finishes it once
-they are all idle, with `"move_agents": true` in the policy), unless the sessions are still on an
+they are all idle, or forces it after `move_wait_min` minutes of waiting, 15 by default, with
+`"move_agents": true` in the policy), unless the sessions are still on an
 account with no room left: then the autoswitch moves them right away, busy or not, even when a
 switch made with `--no-restart` or `--keep-agents` left them behind on purpose. A session
 keeps in its job the login it was created with, and the move removes it before the resume, so
