@@ -126,6 +126,7 @@ claude-account use pessoal
 |  | `update [--apply [versão]]` | Claude Code: versão instalada, a mais nova e as sessões em background; `--apply` instala pelo instalador nativo, troca o `claude-stable` por rename atômico, espera o daemon adotar as sessões e depois as reinicia (mesmos ids) junto com o Orca já na versão nova, como na troca de conta; `--no-restart` deixa elas na versão antiga até ficarem ociosas |
 |  | `bg-restart [--force]` | move as sessões em background para o perfil ativo, mesmos ids (adia se alguma estiver ocupada) |
 |  | `bg-status` | perfil ativo contra o do daemon, sessões em background, troca pendente, logins presos, resumes que falharam |
+|  | `mirror [--target <host>] [--auto]` | copia os setup-tokens para as máquinas do `mirror.json`: o claude-account de um notebook (deixado na caixa de entrada; o autoswitch de lá roda `mirror-import`, porque o Keychain não aceita gravação pelo ssh) ou o arquivo `nome=token` de um servidor (ordem mantida, `exclude` fica fora). Login nativo (`/login`) nunca viaja. O autoswitch roda no fim de cada rodada e só conecta quando um token mudou ou de hora em hora; log em `mirror.log` |
 
 ## Sessões em background
 

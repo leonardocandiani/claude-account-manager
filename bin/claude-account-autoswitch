@@ -49,6 +49,11 @@ log() { printf '%s %s\n' "$(now_iso)" "$*" | tee -a "$LOG"; }
 
 
 [ -x "$CLI" ] || { log "error=cli_missing path=$CLI"; exit 1; }
+# The other machines in mirror.json follow a new or renewed token on the next run, whatever
+# this run decides (it logs to mirror.log, and only when something moved).
+[ "$dry_run" = true ] || trap '"$CLI" mirror --auto >/dev/null 2>&1 || true' EXIT
+# And tokens another machine mirrored here are imported before measuring, so they count now.
+[ "$dry_run" = true ] || "$CLI" mirror-import >/dev/null 2>&1 || true
 [ -f "$POLICY" ] || { log "error=policy_missing path=$POLICY"; exit 1; }
 if [ -e "$OFF" ]; then log "skip=kill_switch file=$OFF"; exit 0; fi
 

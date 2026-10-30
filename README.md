@@ -128,6 +128,7 @@ claude-account use personal
 |  | `update [--apply [version]]` | Claude Code: installed, latest and the background sessions; `--apply` installs it with the native installer, replaces `claude-stable` by an atomic rename, waits for the daemon to adopt the sessions, then restarts them (same ids) and Orca on the new version, as a switch does; `--no-restart` leaves them on the old version until they go idle |
 |  | `bg-restart [--force]` | move background sessions to the active profile, same ids (deferred while one is busy) |
 |  | `bg-status` | active profile vs the daemon's, background sessions, pending move, pinned logins, failed resumes |
+|  | `mirror [--target <host>] [--auto]` | copy the setup-tokens to the machines in `mirror.json`: a laptop's claude-account (left in its inbox; its autoswitch runs `mirror-import`, since its Keychain takes no write over ssh) or a server's `name=token` file (order kept, `exclude` left out). A native `/login` never travels. The autoswitch runs it on exit, and it only connects when a token changed or hourly; log in `mirror.log` |
 
 ## Background sessions
 

@@ -1363,6 +1363,229 @@ cmd_use() {
 
 # Interactive screen (Ink). Looks for the wizard next to this script (repo
 # checkout) or in the installed lib dir; the CLI stays the engine underneath.
+# Other machines get this machine's setup-tokens: a laptop runs the same rotation, a server
+# keeps a plain `name=token` file. A native /login never travels (its refresh token rotates,
+# and two copies of it revoke each other). mirror.json names the targets, for example:
+#   {"targets":[{"host":"macpro","kind":"claude-account"},
+#     {"host":"node02","kind":"env-file","path":"/root/.segsclaw/claude-tokens.env","exclude":["quasar"]}]}
+MIRROR_FILE="$CONFIG_DIR/mirror.json"
+MIRROR_STATE="$CONFIG_DIR/mirror-state.json"
+MIRROR_LOG="$CONFIG_DIR/mirror.log"
+MIRROR_RECHECK_S=3600
+
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# Runs a POSIX script on the host: arguments quoted, the secrets only on stdin.
+remote_sh() { # host script [args...]
+  local host="$1" script="$2" cmd a
+  shift 2
+  cmd="sh -c $(sq "$script") sh"
+  for a in "$@"; do cmd="$cmd $(sq "$a")"; done
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" "$cmd"
+}
+
+# name type fingerprint, per profile of a claude-account on the host
+MIRROR_INV_CA='d="${CLAUDE_ACCOUNT_HOME:-$HOME/.config/claude-account}/profiles"
+for f in "$d"/*.json; do
+  [ -f "$f" ] || continue
+  t=$(jq -r .type "$f"); fp=-
+  if [ "$t" = oauth_token ] && v=$(security find-generic-password -a "$USER" -s "$(jq -r .keychainService "$f")" -w 2>/dev/null); then
+    fp=$(printf "%s" "$v" | shasum -a 256 | cut -c1-12)
+  fi
+  printf "%s %s %s\n" "$(jq -r .name "$f")" "$t" "$fp"
+done'
+
+# name fingerprint, per line of a name=token file
+MIRROR_INV_ENV='[ -f "$1" ] || exit 0
+if command -v sha256sum >/dev/null 2>&1; then h=sha256sum; else h="shasum -a 256"; fi
+while IFS= read -r l; do
+  n=${l%%=*}; [ -n "$n" ] || continue
+  printf "%s %s\n" "$n" "$(printf "%s" "${l#*=}" | $h | cut -c1-12)"
+done < "$1"'
+
+# Rewrites the file in place: a known name keeps its line (and so its place, the first line
+# being the server fail-safe), a new one goes to the end, an excluded one goes away.
+MIRROR_WRITE_ENV='set -eu
+umask 077
+f=$1; shift
+new=$(cat)
+tmp="$f.tmp.$$"
+{
+  if [ -f "$f" ]; then
+    while IFS= read -r l; do
+      n=${l%%=*}; [ -n "$n" ] || continue
+      drop=; for x in "$@"; do [ "$n" = "$x" ] && drop=1; done
+      [ -n "$drop" ] && continue
+      u=$(printf "%s\n" "$new" | grep -m1 "^$n=" || true)
+      if [ -n "$u" ]; then printf "%s\n" "$u"; else printf "%s\n" "$l"; fi
+    done < "$f"
+  fi
+  printf "%s\n" "$new" | while IFS= read -r l; do
+    n=${l%%=*}; [ -n "$n" ] || continue
+    grep -q "^$n=" "$f" 2>/dev/null || printf "%s\n" "$l"
+  done
+} > "$tmp"
+chmod 600 "$tmp"
+mv "$tmp" "$f"'
+
+# A laptop's Keychain takes no write over ssh ("User interaction is not allowed", 30/10/2026),
+# so the token is left in its inbox (0600) and its own autoswitch, which runs in the login
+# session, imports it with add-oauth on the next run. Lines: token, account, 1 to join the chain.
+MIRROR_DROP='set -eu
+umask 077
+d="${CLAUDE_ACCOUNT_HOME:-$HOME/.config/claude-account}/inbox"
+mkdir -p "$d"
+cat > "$d/.$1.tmp"
+mv "$d/.$1.tmp" "$d/$1"'
+
+mirror_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$MIRROR_LOG"; }
+
+# name<TAB>Keychain item<TAB>account, for every profile with a setup-token: its own, or for a
+# native profile the one it is measured by.
+mirror_sources() {
+  local f
+  for f in "$PROFILES_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    jq -r 'select(.type == "oauth_token" or (.measureKeychainService // "") != "")
+      | [.name, (if .type == "oauth_token" then .keychainService else .measureKeychainService end), (.account // "")]
+      | @tsv' "$f"
+  done
+}
+
+mirror_claude_account() { # host; reads M_NAMES M_FPS M_ITEMS M_ACCTS, honours M_EXCLUDE
+  local host="$1" inv i n line token args changed=0
+  inv="$(remote_sh "$host" "$MIRROR_INV_CA")" || { mirror_log "mirror: $host: unreachable"; return 1; }
+  for i in "${!M_NAMES[@]}"; do
+    n="${M_NAMES[$i]}"
+    case " $M_EXCLUDE " in *" $n "*) continue ;; esac
+    line="$(printf '%s\n' "$inv" | awk -v n="$n" '$1 == n' | head -1)"
+    case "$line" in
+      *" native_archive "*) [ "$auto" = true ] || mirror_log "mirror: $host: $n kept, it has a login of its own there"; continue ;;
+      *" ${M_FPS[$i]}") continue ;;
+    esac
+    token="$(keychain_get "${M_ITEMS[$i]}")" || { mirror_log "mirror: $host: $n skipped, Keychain item unreadable"; continue; }
+    if printf '%s\n%s\n%s\n' "$token" "${M_ACCTS[$i]}" "$([ -z "$line" ] && echo 1 || echo 0)" | remote_sh "$host" "$MIRROR_DROP" "$n" >/dev/null 2>&1; then
+      mirror_log "mirror: $host: $n $([ -z "$line" ] && echo new || echo renewed) (${M_FPS[$i]}), in its inbox until its autoswitch imports it"
+      changed=1
+    else
+      mirror_log "mirror: $host: could not leave $n in its inbox"
+      unset token; return 1
+    fi
+    unset token
+  done
+  [ "$changed" = 1 ] || [ "$auto" = true ] || mirror_log "mirror: $host: up to date"
+  return 0
+}
+
+mirror_env_file() { # host path; same inputs as above. Names go lowercase, as the server reads them.
+  local host="$1" path="$2" inv i n payload="" drop=() x token changed=""
+  inv="$(remote_sh "$host" "$MIRROR_INV_ENV" "$path")" || { mirror_log "mirror: $host: unreachable"; return 1; }
+  for x in $M_EXCLUDE; do
+    x="$(printf '%s' "$x" | tr '[:upper:]' '[:lower:]')"
+    printf '%s\n' "$inv" | awk -v n="$x" '$1 == n' | grep -q . && { drop+=("$x"); changed="$changed -$x"; }
+  done
+  for i in "${!M_NAMES[@]}"; do
+    n="$(printf '%s' "${M_NAMES[$i]}" | tr '[:upper:]' '[:lower:]')"
+    case " $(printf '%s' "$M_EXCLUDE" | tr '[:upper:]' '[:lower:]') " in *" $n "*) continue ;; esac
+    printf '%s\n' "$inv" | grep -qx "$n ${M_FPS[$i]}" && continue
+    token="$(keychain_get "${M_ITEMS[$i]}")" || { mirror_log "mirror: $host: $n skipped, Keychain item unreadable"; continue; }
+    payload="$payload$n=$token
+"
+    changed="$changed +$n(${M_FPS[$i]})"
+  done
+  unset token
+  if [ -z "$changed" ]; then
+    [ "$auto" = true ] || mirror_log "mirror: $host: up to date"
+    return 0
+  fi
+  if printf '%s' "$payload" | remote_sh "$host" "$MIRROR_WRITE_ENV" "$path" ${drop[@]+"${drop[@]}"}; then
+    payload=""
+    mirror_log "mirror: $host: $path$changed"
+  else
+    payload=""
+    mirror_log "mirror: $host: could not write $path"
+    return 1
+  fi
+}
+
+# The receiving side of a mirror to a laptop: what the other machine left in the inbox.
+cmd_mirror_import() {
+  local d="$CONFIG_DIR/inbox" f n token acct reserve args
+  [ -d "$d" ] || return 0
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    n="$(basename "$f")"
+    { IFS= read -r token; IFS= read -r acct; IFS= read -r reserve; } < "$f" || true
+    # A login of its own here wins over a token from elsewhere: add-oauth would replace it.
+    if [ "$(jq -r '.type // empty' "$(profile_file "$n")" 2>/dev/null)" = native_archive ]; then
+      rm -f "$f"; mirror_log "mirror: $n not imported, it is a login of its own here"; continue
+    fi
+    args=(add-oauth "$n" --token-stdin)
+    [ -n "$acct" ] && args+=(--account "$acct")
+    [ "$reserve" = 1 ] && args+=(--reserve)
+    if printf '%s\n' "$token" | "$0" "${args[@]}" >/dev/null 2>&1; then
+      rm -f "$f"; mirror_log "mirror: imported $n ($(fingerprint "$token"))"
+    else
+      mirror_log "mirror: $n kept in $d, add-oauth refused it (try: claude-account mirror-import)"
+    fi
+  done
+  unset token
+}
+
+cmd_mirror() {
+  local auto=false only="" n item acct token i count host kind path sig last failed=0 now rc
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --auto) auto=true ;;
+      --target) shift; only="${1:-}" ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  if [ ! -f "$MIRROR_FILE" ]; then
+    [ "$auto" = true ] || note "mirror: no targets (write $MIRROR_FILE)"
+    return 0
+  fi
+  M_NAMES=(); M_FPS=(); M_ITEMS=(); M_ACCTS=()
+  while IFS=$'\t' read -r n item acct; do
+    [ -n "$n" ] || continue
+    token="$(keychain_get "$item")" || { [ "$auto" = true ] || note "mirror: $n has no readable token here, skipped"; continue; }
+    M_NAMES+=("$n"); M_FPS+=("$(fingerprint "$token")"); M_ITEMS+=("$item"); M_ACCTS+=("$acct")
+  done < <(mirror_sources)
+  unset token
+  count="$(jq -r '.targets | length' "$MIRROR_FILE")" || die "mirror: unreadable $MIRROR_FILE"
+  now="$(date -u +%s)"
+  for ((i = 0; i < count; i++)); do
+    host="$(jq -r ".targets[$i].host" "$MIRROR_FILE")"
+    kind="$(jq -r ".targets[$i].kind" "$MIRROR_FILE")"
+    path="$(jq -r ".targets[$i].path // empty" "$MIRROR_FILE")"
+    M_EXCLUDE="$(jq -r ".targets[$i].exclude // [] | join(\" \")" "$MIRROR_FILE")"
+    [ -z "$only" ] || [ "$only" = "$host" ] || continue
+    sig="$(for n in "${!M_NAMES[@]}"; do printf '%s %s\n' "${M_NAMES[$n]}" "${M_FPS[$n]}"; done | shasum -a 256 | cut -c1-12)"
+    if [ "$auto" = true ]; then
+      last="$(jq -r --arg h "$host" --arg s "$sig" 'if .[$h].sig == $s then .[$h].at else 0 end' "$MIRROR_STATE" 2>/dev/null || echo 0)"
+      [ $((now - ${last:-0})) -lt "$MIRROR_RECHECK_S" ] && continue
+    fi
+    # One target down must not keep the others from getting the token (set -e).
+    rc=0
+    case "$kind" in
+      claude-account) mirror_claude_account "$host" || rc=1 ;;
+      env-file)
+        if [ -n "$path" ]; then mirror_env_file "$host" "$path" || rc=1
+        else mirror_log "mirror: $host: env-file without path"; rc=1; fi ;;
+      *) mirror_log "mirror: $host: unknown kind '$kind'"; rc=1 ;;
+    esac
+    if [ "$rc" -eq 0 ]; then
+      jq --arg h "$host" --arg s "$sig" --argjson t "$now" '.[$h] = {sig: $s, at: $t}' "$MIRROR_STATE" 2>/dev/null > "$MIRROR_STATE.tmp" \
+        || jq -n --arg h "$host" --arg s "$sig" --argjson t "$now" '{($h): {sig: $s, at: $t}}' > "$MIRROR_STATE.tmp"
+      mv "$MIRROR_STATE.tmp" "$MIRROR_STATE"
+    else
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
 cmd_wizard() {
   for dir in "$(dirname "$0")/../wizard" "$HOME/.local/lib/claude-account-manager/wizard" "${CLAUDE_ACCOUNT_WIZARD_DIR:-}"; do
     [ -n "$dir" ] && [ -f "$dir/index.mjs" ] && [ -d "$dir/node_modules" ] && break
@@ -1833,6 +2056,11 @@ Usage:
   claude-account measure [name...]                  rate-limit state per profile (headers, no secrets)
   claude-account exec [args...]                     run the native binary under the active profile
   claude-account regime [--json|livre|economia|auto] what the quota allows right now (see claude-account-regime --help)
+  claude-account mirror [--target <host>] [--auto]  copy the setup-tokens to the machines in mirror.json
+                                                    (a laptop's claude-account or a server's name=token
+                                                    file); --auto: only when a token changed, or hourly
+  claude-account mirror-import                      add the tokens another machine left in the inbox
+                                                    (the autoswitch runs it)
   claude-account update [--apply [version] [--no-restart]]
                                                     Claude Code: installed, latest, sessions; --apply installs
                                                     it, refreshes claude-stable, waits for the daemon to adopt
@@ -1865,6 +2093,8 @@ case "$command_name" in
   bg-restart) cmd_bg_restart "$@" ;;
   bg-status) cmd_bg_status "$@" ;;
   update) cmd_update "$@" ;;
+  mirror) cmd_mirror "$@" ;;
+  mirror-import) cmd_mirror_import "$@" ;;
   _bg-restart-worker) cmd_bg_restart_worker "$@" ;;
   regime) exec "$(dirname "$0")/claude-account-regime" "$@" ;;
   help|-h|--help) usage ;;
