@@ -42,7 +42,8 @@ write(f'{S}/setup-token.py', r'''import os, tty
 tty.setraw(0)
 os.write(1, b'Open \x1b]8;;https://claude.com/oauth/x\x07this link\x1b]8;;\x07\r\n'
          b'Paste\x1b[1Ccode\x1b[1Chere\x1b[1Cif\x1b[1Cprompted\x1b[1C>\x1b[1C')
-while os.read(0, 1) not in (b'', b'\r'):
+# A chunk with text is a paste, and a CR inside it is not Enter: only a lone CR submits.
+while (data := os.read(0, 4096)) not in (b'', b'\r'):
     pass
 os.write(1, b'\r\nsk-ant-oat01-WIZTOKEN\r\n')
 # 2.1.310 then waits for an Enter instead of exiting.

@@ -230,7 +230,10 @@ function setupToken({ onUrl, onNeedCode, onDone, onStall }) {
   // The prompt reads the pty in raw mode, where only CR is Enter: with LF the code was typed
   // and never submitted.
   const sendCode = (code) => {
-    child.stdin.write(code + '\r');
+    // A long code with its Enter in one write reads as a paste, and the Enter is swallowed
+    // (30/10/2026: a 92-character code sat typed and never sent). The Enter goes on its own.
+    child.stdin.write(code);
+    setTimeout(() => child.stdin.write('\r'), 300);
     stall = setTimeout(() => {
       if (finished) return;
       try { writeFileSync(LOG, masked(), { mode: 0o600 }); } catch {}
