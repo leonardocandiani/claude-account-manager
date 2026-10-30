@@ -199,6 +199,11 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
   let raw = '';
   let url = null;
   let asked = false;
+  let finished = false;
+  const OAT = /sk-ant-oat01-[A-Za-z0-9_-]+(?=[^A-Za-z0-9_-])/g;
+  // 2.1.310 does not exit after the token or after a refused code: it waits for an Enter that
+  // never comes, and the wizard sat on "finishing the login" (30/10/2026). The screen decides.
+  const finish = (r) => { if (finished) return; finished = true; onDone(r); child.kill(); };
   const feed = (chunk) => {
     raw += chunk.toString();
     buf += stripAnsi(chunk.toString());
@@ -209,15 +214,14 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
     }
     // 2.1.310 draws the spaces as cursor moves: the stripped screen reads "Pastecodehere".
     if (!asked && /Paste\s*code\s*here/i.test(buf)) { asked = true; onNeedCode(); }
+    const oat = buf.match(OAT)?.pop();
+    if (oat) finish({ code: 0, oat });
+    else if (asked && /OAuth\s*error/i.test(buf)) finish({ code: 1, oat: null });
   };
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
-  child.on('error', () => onDone({ code: 127, token: null }));
-  child.on('close', (code) => {
-    const OAT = 'sk-ant-oat01';
-    const oat = buf.match(new RegExp(OAT + '-[A-Za-z0-9_-]+', 'g'))?.pop() || null;
-    onDone({ code, oat });
-  });
+  child.on('error', () => finish({ code: 127, oat: null }));
+  child.on('close', (code) => finish({ code, oat: buf.match(/sk-ant-oat01-[A-Za-z0-9_-]+/g)?.pop() || null }));
   // The prompt reads the pty in raw mode, where only CR is Enter: with LF the code was typed
   // and never submitted.
   return { sendCode: (code) => child.stdin.write(code + '\r'), kill: () => child.kill() };

@@ -45,6 +45,9 @@ os.write(1, b'Open \x1b]8;;https://claude.com/oauth/x\x07this link\x1b]8;;\x07\r
 while os.read(0, 1) not in (b'', b'\r'):
     pass
 os.write(1, b'\r\nsk-ant-oat01-WIZTOKEN\r\n')
+# 2.1.310 then waits for an Enter instead of exiting.
+while os.read(0, 1) not in (b'', b'\r'):
+    pass
 ''')
 write(f'{S}/claude', r'''#!/usr/bin/env bash
 case "$1" in
