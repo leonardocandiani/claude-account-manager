@@ -223,6 +223,10 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
   return { sendCode: (code) => child.stdin.write(code + '\r'), kill: () => child.kill() };
 }
 
+// The code field shows right away and takes every key, so the link is copied as soon as it
+// shows: a "press c" never reached the clipboard (30/10/2026).
+const copyLink = (u) => { const p = execFile('pbcopy', [], () => {}); p.stdin.on('error', () => {}); p.stdin.end(u); };
+
 // ---- small pieces ----------------------------------------------------------
 const Badge = ({ label, value }) => h(Box, { marginRight: 1 },
   h(Text, { backgroundColor: C.badgeBg, color: C.muted }, ` ${label} `),
@@ -382,7 +386,7 @@ function Renew({ profile, onBack }) {
 
   useEffect(() => {
     const c = setupToken({
-      onUrl: (u) => { setUrl(u); setMsg(`Sign in as ${profile.email || profile.name} and approve.`); },
+      onUrl: (u) => { setUrl(u); copyLink(u); setMsg(`Sign in as ${profile.email || profile.name} and approve.`); },
       onNeedCode: () => setNeedCode(true),
       onDone: ({ oat: t }) => {
         if (!t) { setFailedAt(0); setMsg('The browser login did not finish. Nothing changed.'); return; }
@@ -418,7 +422,7 @@ function Renew({ profile, onBack }) {
   const body = [];
   if (step === 0 && failedAt == null) {
     body.push(h(Text, { key: 'm', color: C.cream }, msg));
-    if (url) body.push(h(Text, { key: 'u', color: C.muted }, `Didn't open?  ${url}`), h(Text, { key: 'c', color: C.muted }, 'press c to copy the link'));
+    if (url) body.push(h(Text, { key: 'u', color: C.muted }, `Didn't open?  ${url}`), h(Text, { key: 'c', color: C.muted }, 'the link is already in the clipboard'));
     if (needCode) body.push(h(Box, { key: 'i', marginTop: 1 }, h(Text, { color: C.accent }, 'Paste the code here ▸ '), h(Input, { value: code, onChange: setCode, mask: '•', onSubmit: (v) => { ctl.sendCode(v.trim()); setNeedCode(false); setMsg('Code sent, finishing the login...'); } })));
   }
   if (step >= 1 && !result) {
@@ -470,7 +474,7 @@ function AddAccount({ profiles, onBack, onSwitch, onFullLogin }) {
     if (profiles.some((p) => p.name === n)) { setNameErr(`"${n}" already exists. To refresh its token, use "Renew a token".`); return; }
     setName(n); setNameErr(''); setStep(1); setMsg('Opening the browser...');
     setCtl(setupToken({
-      onUrl: (u) => { setUrl(u); setMsg('Sign in with the account you are adding and approve.'); },
+      onUrl: (u) => { setUrl(u); copyLink(u); setMsg('Sign in with the account you are adding and approve.'); },
       onNeedCode: () => setNeedCode(true),
       onDone: ({ oat: t }) => {
         if (!t) { setFailedAt(1); setMsg('The browser login did not finish. Nothing was stored.'); return; }
@@ -517,7 +521,7 @@ function AddAccount({ profiles, onBack, onSwitch, onFullLogin }) {
   }
   if (step === 1 && failedAt == null) {
     body.push(h(Text, { key: 'm', color: C.cream }, msg));
-    if (url) body.push(h(Text, { key: 'u', color: C.muted }, `Didn't open?  ${url}`), h(Text, { key: 'c', color: C.muted }, 'press c to copy the link'));
+    if (url) body.push(h(Text, { key: 'u', color: C.muted }, `Didn't open?  ${url}`), h(Text, { key: 'c', color: C.muted }, 'the link is already in the clipboard'));
     if (needCode) body.push(h(Box, { key: 'i', marginTop: 1 }, h(Text, { color: C.accent }, 'Paste the code here ▸ '), h(Input, { value: code, onChange: setCode, mask: '•', onSubmit: (v) => { ctl.sendCode(v.trim()); setNeedCode(false); setMsg('Code sent, finishing the login...'); } })));
   }
   if (step === 2) {

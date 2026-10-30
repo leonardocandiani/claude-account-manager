@@ -28,6 +28,7 @@ case "$cmd" in find-generic-password) [ -f "$f" ] || exit 44; $want && cat "$f";
 exit 0
 ''', 0o755)
 write(f'{S}/launchctl', '#!/usr/bin/env bash\nexit 0\n', 0o755)
+write(f'{S}/pbcopy', '#!/usr/bin/env bash\ncat > "$(dirname "$0")/clipboard"\n', 0o755)
 write(f'{S}/curl', r'''#!/usr/bin/env bash
 case "$*" in *file://*) exec /usr/bin/curl "$@" ;; esac
 hdr=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && hdr="$2"; shift; done
@@ -166,6 +167,8 @@ send('leo\r')
 check('add: an existing name is refused', read_until(r'already exists'))
 send('\x7f' * 3 + 'terceira\r', 1.0)
 check('add: browser step reaches the code prompt', read_until(r'Paste the code here'))
+# The code field takes every key, so the link goes to the clipboard by itself.
+check('add: the link is in the clipboard', open(f'{S}/clipboard').read() == 'https://claude.com/oauth/x' if os.path.exists(f'{S}/clipboard') else False)
 send('abc123\r', 1.5)
 check('add: asks the e-mail', read_until(r'E-mail of this account'))
 send('t@x.io\r')
