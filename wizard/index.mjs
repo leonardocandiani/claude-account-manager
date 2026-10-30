@@ -10,7 +10,7 @@ import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import { spawn, execFile } from 'node:child_process';
-import { readdirSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -193,7 +193,7 @@ const stripOsc = (s) => s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 // Drives `claude setup-token` through pipes: the browser is opened by the
 // child itself; we only read its screen to know when to hand over the code and
 // to catch the token. The token never reaches the terminal.
-function setupToken({ onUrl, onNeedCode, onDone }) {
+function setupToken({ onUrl, onNeedCode, onDone, onStall }) {
   const child = spawn('python3', ['-c', PTY_BRIDGE, NATIVE, 'setup-token'], { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: '', COLUMNS: '400' }, stdio: ['pipe', 'pipe', 'pipe'] });
   let buf = '';
   let raw = '';
@@ -204,6 +204,10 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
   // 2.1.310 does not exit after the token or after a refused code: it waits for an Enter that
   // never comes, and the wizard sat on "finishing the login" (30/10/2026). The screen decides.
   const finish = (r) => { if (finished) return; finished = true; onDone(r); child.kill(); };
+  // The login screen, token masked, kept for the case nothing above recognizes it.
+  const LOG = join(HOME, 'wizard-login.log');
+  const masked = () => buf.replace(/sk-ant-[A-Za-z0-9_-]+/g, '<token>');
+  let stall = null;
   const feed = (chunk) => {
     raw += chunk.toString();
     buf += stripAnsi(chunk.toString());
@@ -221,10 +225,20 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
   child.on('error', () => finish({ code: 127, oat: null }));
+  child.on('close', () => clearTimeout(stall));
   child.on('close', (code) => finish({ code, oat: buf.match(/sk-ant-oat01-[A-Za-z0-9_-]+/g)?.pop() || null }));
   // The prompt reads the pty in raw mode, where only CR is Enter: with LF the code was typed
   // and never submitted.
-  return { sendCode: (code) => child.stdin.write(code + '\r'), kill: () => child.kill() };
+  const sendCode = (code) => {
+    child.stdin.write(code + '\r');
+    stall = setTimeout(() => {
+      if (finished) return;
+      try { writeFileSync(LOG, masked(), { mode: 0o600 }); } catch {}
+      const last = masked().split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() || '(nothing)';
+      onStall?.(`The login shows: ${last.slice(-160)}  (screen saved in ${LOG})`);
+    }, 15000);
+  };
+  return { sendCode, kill: () => { clearTimeout(stall); child.kill(); } };
 }
 
 // The code field shows right away and takes every key, so the link is copied as soon as it
@@ -392,6 +406,7 @@ function Renew({ profile, onBack }) {
     const c = setupToken({
       onUrl: (u) => { setUrl(u); copyLink(u); setMsg(`Sign in as ${profile.email || profile.name} and approve.`); },
       onNeedCode: () => setNeedCode(true),
+      onStall: (m) => setMsg(m),
       onDone: ({ oat: t }) => {
         if (!t) { setFailedAt(0); setMsg('The browser login did not finish. Nothing changed.'); return; }
         setToken(t); setNeedCode(false); setStep(1); setMsg('Token received (kept hidden).');
@@ -480,6 +495,7 @@ function AddAccount({ profiles, onBack, onSwitch, onFullLogin }) {
     setCtl(setupToken({
       onUrl: (u) => { setUrl(u); copyLink(u); setMsg('Sign in with the account you are adding and approve.'); },
       onNeedCode: () => setNeedCode(true),
+      onStall: (m) => setMsg(m),
       onDone: ({ oat: t }) => {
         if (!t) { setFailedAt(1); setMsg('The browser login did not finish. Nothing was stored.'); return; }
         setToken(t); setNeedCode(false); setStep(2); setMsg('Signed in (the token stays hidden).'); setAskEmail(true);
