@@ -207,7 +207,8 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
       const m = raw.match(/\x1b\]8;[^;]*;(https:\/\/claude\.com\/[^\x07\x1b]+)/) || buf.match(/(https:\/\/claude\.com\/\S+)/);
       if (m) { url = m[1]; onUrl(url); }
     }
-    if (!asked && /Paste code here/i.test(buf)) { asked = true; onNeedCode(); }
+    // 2.1.310 draws the spaces as cursor moves: the stripped screen reads "Pastecodehere".
+    if (!asked && /Paste\s*code\s*here/i.test(buf)) { asked = true; onNeedCode(); }
   };
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
@@ -217,7 +218,9 @@ function setupToken({ onUrl, onNeedCode, onDone }) {
     const oat = buf.match(new RegExp(OAT + '-[A-Za-z0-9_-]+', 'g'))?.pop() || null;
     onDone({ code, oat });
   });
-  return { sendCode: (code) => child.stdin.write(code + '\n'), kill: () => child.kill() };
+  // The prompt reads the pty in raw mode, where only CR is Enter: with LF the code was typed
+  // and never submitted.
+  return { sendCode: (code) => child.stdin.write(code + '\r'), kill: () => child.kill() };
 }
 
 // ---- small pieces ----------------------------------------------------------

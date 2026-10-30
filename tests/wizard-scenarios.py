@@ -35,12 +35,20 @@ now="$(date +%s)"
 printf 'anthropic-ratelimit-unified-5h-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: 0.12\r\nanthropic-ratelimit-unified-5h-reset: %s\r\nanthropic-ratelimit-unified-7d-status: allowed\r\nanthropic-ratelimit-unified-7d-utilization: 0.34\r\nanthropic-ratelimit-unified-7d-reset: %s\r\n' "$((now + 7200))" "$((now + 108000))" > "$hdr"
 printf 200
 ''', 0o755)
+# As 2.1.310 draws it: the spaces as cursor moves, and the code read in raw mode, where
+# only CR is Enter (a LF is just one more character of the code).
+write(f'{S}/setup-token.py', r'''import os, tty
+tty.setraw(0)
+os.write(1, b'Open \x1b]8;;https://claude.com/oauth/x\x07this link\x1b]8;;\x07\r\n'
+         b'Paste\x1b[1Ccode\x1b[1Chere\x1b[1Cif\x1b[1Cprompted\x1b[1C>\x1b[1C')
+while os.read(0, 1) not in (b'', b'\r'):
+    pass
+os.write(1, b'\r\nsk-ant-oat01-WIZTOKEN\r\n')
+''')
 write(f'{S}/claude', r'''#!/usr/bin/env bash
 case "$1" in
   setup-token)
-    printf 'Open \033]8;;https://claude.com/oauth/x\007this link\033]8;;\007\nPaste code here: '
-    IFS= read -r code
-    printf '\nsk-ant-oat01-WIZTOKEN\n' ;;
+    exec python3 "$(dirname "$0")/setup-token.py" ;;
   auth) echo '{"loggedIn":true}' ;;
   agents) echo '[]' ;;
 esac
